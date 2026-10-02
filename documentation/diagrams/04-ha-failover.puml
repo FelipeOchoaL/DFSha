@@ -1,0 +1,46 @@
+@startuml DFSha_ha
+title DFSha — Alta disponibilidad NameNode (activo / standby)
+
+skinparam sequenceMessageAlign center
+
+actor Usuario
+participant "CLI / SDK" as Cliente
+participant "NameNode\nactivo" as NN
+participant "NameNode\nstandby" as ST
+participant "DataNodes" as DN
+
+== Operación normal ==
+
+Cliente -> NN : allocate / commit / ls
+NN -> ST : ReplicateEditLog(op)
+ST -> ST : aplicar log en réplica\nde metadatos
+ST --> NN : ACK
+NN --> Cliente : 200
+
+loop cada 3 s
+    DN -> NN : Heartbeat + BlockReport
+    NN -> ST : estado de DN vivos\n(resumen o log)
+end
+
+== Fallo del activo ==
+
+NN -> NN : crash / partición
+Cliente -> NN : request
+Cliente -> Cliente : timeout / error de red
+
+ST -> ST : 3 heartbeats de NN perdidos
+ST -> ST : promoverse a ACTIVO\n(último log aplicado)
+
+Cliente -> ST : reintento al standby\n(failover, no IP estática)
+ST --> Cliente : 200 (misma semántica)
+
+DN -> ST : Heartbeats pasan al nuevo activo
+ST --> DN : OK
+
+note over Cliente, ST
+  Transparencia RNF7: el usuario no
+  elige el NameNode. El SDK resuelve
+  el líder en cada operación.
+end note
+
+@enduml

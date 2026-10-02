@@ -1,0 +1,44 @@
+@startuml DFSha_namespace
+title DFSha — Namespace y autenticación (ls / mkdir / rm)
+
+skinparam sequenceMessageAlign center
+
+actor Usuario
+participant "CLI / SDK" as Cliente
+participant "NameNode\nactivo" as NN
+participant "NameNode\nstandby" as ST
+participant "DataNodes" as DN
+
+== Login ==
+
+Usuario -> Cliente : dfsha login
+Cliente -> NN : POST /auth/login {user, pass}
+NN --> Cliente : JWT
+Cliente -> Cliente : guardar token (cwd local)
+
+== mkdir / ls / cd ==
+
+Usuario -> Cliente : mkdir /user/ana/docs
+Cliente -> NN : POST /fs/mkdir\nAuthorization: Bearer JWT
+NN -> NN : ACL + crear inodo directorio
+NN -> ST : ReplicateEditLog(mkdir)
+NN --> Cliente : 201
+
+Usuario -> Cliente : cd /user/ana/docs
+Cliente -> Cliente : cwd solo en el cliente\n(no se persiste en el NN)
+
+Usuario -> Cliente : ls
+Cliente -> NN : GET /fs/ls?path=/user/ana/docs
+NN --> Cliente : entradas del directorio
+
+== rm de archivo ==
+
+Usuario -> Cliente : rm /user/ana/docs/a.txt
+Cliente -> NN : DELETE /fs/rm?path=...
+NN -> NN : quitar path del namespace\nmarcar bloques huérfanos
+NN -> ST : ReplicateEditLog(rm)
+NN -> DN : DeleteBlock(blockIds)\n(en heartbeat response o RPC)
+DN -> DN : borrar del disco
+NN --> Cliente : 204
+
+@enduml

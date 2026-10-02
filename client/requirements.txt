@@ -1,0 +1,4 @@
+# Dependencias del cliente
+requests
+grpcio
+grpcio-tools

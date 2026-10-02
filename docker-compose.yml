@@ -1,0 +1,3 @@
+# Clúster local DFSha: namenode-active, namenode-standby y datanode-1..4 (racks A y B).
+# Se completa cuando existan los Dockerfiles en services/.
+services: {}

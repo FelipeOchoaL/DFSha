@@ -1,0 +1,64 @@
+@startuml DFSha_put
+title DFSha — Proceso put (escritura write-once)
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor Usuario
+participant "CLI / SDK\n(Python)" as Cliente
+participant "NameNode\nactivo" as NN
+participant "DataNode 1\n(primary, Rack A)" as DN1
+participant "DataNode 2\n(Rack B)" as DN2
+participant "DataNode 3\n(Rack B)" as DN3
+participant "NameNode\nstandby" as ST
+
+Usuario -> Cliente : put archivo.txt /user/ana/archivo.txt
+activate Cliente
+
+Cliente -> Cliente : login JWT (si no hay sesión)
+Cliente -> Cliente : partir archivo en bloques de 8 MB
+
+loop para cada bloque
+    Cliente -> NN : POST /files/allocate\n{path, blockIndex, size}
+    activate NN
+    NN -> NN : validar ACL y que el path\nno exista / esté en creación
+    NN -> NN : colocar réplicas\n(rack awareness, factor 3)
+    NN --> Cliente : blockId + [DN1, DN2, DN3]
+    NN -> ST : ReplicateEditLog(allocate)
+    deactivate NN
+
+    Cliente -> DN1 : gRPC WriteBlock(blockId, bytes, pipeline=[DN2, DN3])
+    activate DN1
+    DN1 -> DN1 : escribir en disco +\nchecksum + cifrar en reposo
+    DN1 -> DN2 : gRPC ReplicateBlock(...)
+    activate DN2
+    DN2 -> DN2 : persistir bloque
+    DN2 -> DN3 : gRPC ReplicateBlock(...)
+    activate DN3
+    DN3 -> DN3 : persistir bloque
+    DN3 --> DN2 : ACK
+    deactivate DN3
+    DN2 --> DN1 : ACK
+    deactivate DN2
+    DN1 --> Cliente : ACK (pipeline 3/3)
+    deactivate DN1
+
+    Cliente -> NN : POST /files/commit\n{path, blockId, checksum}
+    activate NN
+    NN -> NN : registrar bloque en\nmetadatos del archivo
+    NN -> ST : ReplicateEditLog(commit)
+    NN --> Cliente : 200 committed
+    deactivate NN
+end
+
+Cliente -> NN : POST /files/finalize {path}
+activate NN
+NN -> NN : marcar archivo COMPLETE
+NN -> ST : ReplicateEditLog(finalize)
+NN --> Cliente : 201 created
+deactivate NN
+
+Cliente --> Usuario : ok — /user/ana/archivo.txt
+deactivate Cliente
+
+@enduml

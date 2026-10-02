@@ -1,0 +1,41 @@
+@startuml DFSha_heartbeat
+title DFSha — Heartbeat, block report y re-replicación
+
+skinparam sequenceMessageAlign center
+
+participant "NameNode\nactivo" as NN
+participant "DataNode 1" as DN1
+participant "DataNode 2" as DN2
+participant "DataNode 3" as DN3
+participant "DataNode 4\n(destino)" as DN4
+
+== Registro y liveness ==
+
+loop cada 3 s
+    DN1 -> NN : gRPC Heartbeat(diskFree, load)
+    NN --> DN1 : OK | comandos pendientes
+end
+
+loop periódico (p. ej. cada 10 min) o al arrancar
+    DN1 -> NN : gRPC BlockReport([blockIds])
+    NN -> NN : reconciliar mapa\nbloque → DataNodes
+end
+
+== Caída de un DataNode ==
+
+NN -> NN : 3 heartbeats perdidos de DN3\nmarcar DN3 DEAD
+NN -> NN : bloques de DN3 quedan\nunder-replicated (factor < 3)
+
+NN -> DN1 : ReplicateCommand\n(blockId, dest=DN4)
+activate DN1
+DN1 -> DN4 : gRPC ReplicateBlock(blockId)
+activate DN4
+DN4 -> DN4 : persistir réplica
+DN4 --> DN1 : ACK
+deactivate DN4
+DN1 --> NN : réplica completada
+deactivate DN1
+
+NN -> NN : factor de blockId vuelve a 3
+
+@enduml

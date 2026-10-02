@@ -1,0 +1,43 @@
+@startuml DFSha_get
+title DFSha — Proceso get (lectura)
+
+skinparam sequenceMessageAlign center
+
+actor Usuario
+participant "CLI / SDK\n(Python)" as Cliente
+participant "NameNode\nactivo" as NN
+participant "DataNode i\n(réplica viva)" as DN
+
+Usuario -> Cliente : get /user/ana/archivo.txt
+activate Cliente
+
+Cliente -> NN : GET /files/{path}/locations
+activate NN
+NN -> NN : validar JWT + ACL de lectura
+NN -> NN : ordenar réplicas\n(preferir rack / DN vivo)
+NN --> Cliente : [{blockId, size, [DN...]}]
+deactivate NN
+
+Cliente -> Cliente : crear archivo temporal local
+
+par bloques en paralelo (RNF5)
+    Cliente -> DN : gRPC ReadBlock(blockId)
+    activate DN
+    DN -> DN : descifrar + verificar checksum
+    DN --> Cliente : bytes del bloque
+    deactivate DN
+    Cliente -> Cliente : escribir bloque\nen su offset
+end
+
+Cliente -> Cliente : ensamblar y verificar archivo
+Cliente --> Usuario : archivo.txt reconstruido
+deactivate Cliente
+
+note right of NN
+  El NameNode no transporta bytes.
+  Si un DN falla a mitad de get,
+  el cliente reintenta otra réplica
+  de la misma lista (transparencia).
+end note
+
+@enduml

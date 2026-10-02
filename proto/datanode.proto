@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package dfsha.datanode.v1;
+
+option go_package = "dfsha/services/gen/datanode/v1;datanodev1";
+
+// Storage API: clients and other DataNodes talk to a DataNode over gRPC.
+// The NameNode never sends file bytes through this service.
+service DataNode {
+  // Client (or previous hop in the pipeline) streams one block.
+  // First message MUST be header; following messages are data chunks.
+  rpc WriteBlock(stream WriteBlockRequest) returns (WriteBlockResponse);
+
+  // Streams block bytes to the caller. Verifies checksum before completing.
+  rpc ReadBlock(ReadBlockRequest) returns (stream ReadBlockResponse);
+
+  // Used by NameNode after rm / orphan cleanup (not part of the first slice).
+  rpc DeleteBlock(DeleteBlockRequest) returns (DeleteBlockResponse);
+}
+
+message DataNodeEndpoint {
+  string id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string rack = 4;
+}
+
+message WriteBlockHeader {
+  string block_id = 1;
+  uint64 size = 2;
+  // SHA-256 hex of the full block. Required; WriteBlock fails if it does not match.
+  string checksum_sha256 = 3;
+  // Remaining replicas AFTER this node (HDFS pipeline). Empty = this is the last hop.
+  repeated DataNodeEndpoint pipeline = 4;
+}
+
+message WriteBlockRequest {
+  oneof payload {
+    WriteBlockHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message WriteBlockResponse {
+  string block_id = 1;
+  string checksum_sha256 = 2;
+  uint64 bytes_written = 3;
+  // Nodes that acknowledged this write, including self, in pipeline order.
+  repeated string replica_ids = 4;
+}
+
+message ReadBlockRequest {
+  string block_id = 1;
+  uint64 offset = 2;
+  uint64 length = 3; // 0 = until end of block
+}
+
+message ReadBlockResponse {
+  oneof payload {
+    ReadBlockHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ReadBlockHeader {
+  string block_id = 1;
+  uint64 size = 2;
+  string checksum_sha256 = 3;
+}
+
+message DeleteBlockRequest {
+  string block_id = 1;
+}
+
+message DeleteBlockResponse {
+  bool deleted = 1;
+}

@@ -1,0 +1,11 @@
+// Contrato gRPC del plano de control (sin bytes de archivo).
+// - Servicio NameNode: DataNode -> NameNode (Register, Heartbeat, BlockReport, BlockReceived).
+// - Servicio NameNodeHA: NameNode activo -> standby (ReplicateEditLog, Ping).
+// El cliente NO usa este proto: habla REST con el NameNode.
+syntax = "proto3";
+
+package dfsha.namenode.v1;
+
+option go_package = "dfsha/services/gen/namenode/v1;namenodev1";
+
+import "datanode.proto";

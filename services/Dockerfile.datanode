@@ -1,0 +1,1 @@
+# Imagen del DataNode: compila services/cmd/datanode y expone gRPC; monta un volumen para los bloques.
