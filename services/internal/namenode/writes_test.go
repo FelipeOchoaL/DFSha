@@ -1,6 +1,7 @@
 package namenode
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakePlacer devuelve los primeros n DataNodes de una lista fija. Falla si hay
@@ -54,13 +56,19 @@ type writeEnv struct {
 	blocks *BlockMap
 	placer *fakePlacer
 	srv    *RESTServer
+
+	// autoConfirm hace que mustCommit complete las réplicas que falten hasta el
+	// factor de réplica, simulando los BlockReceived de los DataNodes.
+	autoConfirm bool
 }
 
 func newWriteEnv(t *testing.T, dataNodes int) *writeEnv {
 	t.Helper()
 	ns, bm, pl := NewNamespace(), NewBlockMap(), newFakePlacer(dataNodes)
 	srv := NewRESTServer(ns, bm, pl)
-	return &writeEnv{t: t, h: srv.Handler(), ns: ns, blocks: bm, placer: pl, srv: srv}
+	srv.CommitWait = 150 * time.Millisecond
+	srv.CommitPollInterval = 5 * time.Millisecond
+	return &writeEnv{t: t, h: srv.Handler(), ns: ns, blocks: bm, placer: pl, srv: srv, autoConfirm: true}
 }
 
 func (e *writeEnv) post(path, body string) *httptest.ResponseRecorder {
@@ -96,8 +104,20 @@ func (e *writeEnv) mustAllocate(path string, index int, size int64, uploadID str
 	return resp
 }
 
+// confirmReplicas registra réplicas del bloque hasta alcanzar el factor de
+// réplica (los DataNodes simulados se llaman auto-1, auto-2...).
+func (e *writeEnv) confirmReplicas(blockID, checksum string) {
+	e.t.Helper()
+	for i := 1; e.blocks.CountReplicas(blockID, checksum) < e.srv.ReplicationFactor; i++ {
+		must(e.t, e.blocks.AddReplica(blockID, fmt.Sprintf("auto-%d", i), checksum))
+	}
+}
+
 func (e *writeEnv) mustCommit(path, uploadID, blockID string, size int64, checksum string) commitResponse {
 	e.t.Helper()
+	if e.autoConfirm {
+		e.confirmReplicas(blockID, checksum)
+	}
 	w := e.commit(path, uploadID, blockID, size, checksum)
 	if w.Code != http.StatusOK {
 		e.t.Fatalf("commit %s: HTTP %d (%s)", blockID, w.Code, w.Body.String())
@@ -331,15 +351,6 @@ func TestCommitIdempotenteYReplicas(t *testing.T) {
 	wantError(t, e.commit("/f", a.UploadID, a.BlockID, 10, sum('b')), 404, "NOT_FOUND")
 }
 
-// En esta versión commit acepta aunque no haya réplicas confirmadas (US-52 lo endurece).
-func TestCommitSinReplicasEsPermitido(t *testing.T) {
-	e := newWriteEnv(t, 3)
-	a := e.mustAllocate("/f", 0, 10, "")
-	if c := e.mustCommit("/f", a.UploadID, a.BlockID, 10, sum('a')); c.Replicas != 0 {
-		t.Errorf("replicas = %d; quería 0", c.Replicas)
-	}
-}
-
 func TestFinalizeErrores(t *testing.T) {
 	e := newWriteEnv(t, 3)
 	wantError(t, e.finalize("/nope", "x"), 404, "NOT_FOUND")
@@ -469,4 +480,227 @@ func TestSubidasConcurrentes(t *testing.T) {
 			t.Errorf("archivo %s = %+v", en.Name, en)
 		}
 	}
+}
+
+// --- Commit estricto 3 de 3 (US-52) ---
+
+func TestCommitEstrictoSinReplicas(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	a := e.mustAllocate("/f", 0, 10, "")
+
+	w := e.commit("/f", a.UploadID, a.BlockID, 10, sum('a'))
+	wantError(t, w, 409, "BLOCK_NOT_REPLICATED")
+	if !strings.Contains(w.Body.String(), "0 de 3") {
+		t.Errorf("el mensaje debe indicar cuántas réplicas hay: %s", w.Body.String())
+	}
+	if b, _ := e.blocks.Block(a.BlockID); b.Committed() {
+		t.Error("un commit rechazado no debe confirmar el bloque")
+	}
+	// La subida sigue viva: al llegar las réplicas el mismo commit funciona.
+	for _, n := range []string{"dn1", "dn2", "dn3"} {
+		must(t, e.blocks.AddReplica(a.BlockID, n, sum('a')))
+	}
+	if c := e.mustCommit("/f", a.UploadID, a.BlockID, 10, sum('a')); c.Replicas != 3 {
+		t.Errorf("replicas = %d; quería 3", c.Replicas)
+	}
+}
+
+func TestCommitEstrictoFaltaUnaReplica(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	a := e.mustAllocate("/f", 0, 10, "")
+	must(t, e.blocks.AddReplica(a.BlockID, "dn1", sum('a')))
+	must(t, e.blocks.AddReplica(a.BlockID, "dn2", sum('a')))
+
+	w := e.commit("/f", a.UploadID, a.BlockID, 10, sum('a'))
+	wantError(t, w, 409, "BLOCK_NOT_REPLICATED")
+	if !strings.Contains(w.Body.String(), "2 de 3") {
+		t.Errorf("el mensaje debe decir 2 de 3: %s", w.Body.String())
+	}
+}
+
+// Las réplicas con otro checksum no cuentan para el commit.
+func TestCommitEstrictoExigeElMismoChecksum(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	a := e.mustAllocate("/f", 0, 10, "")
+	must(t, e.blocks.AddReplica(a.BlockID, "dn1", sum('a')))
+	must(t, e.blocks.AddReplica(a.BlockID, "dn2", sum('a')))
+	must(t, e.blocks.AddReplica(a.BlockID, "dn3", sum('f'))) // copia distinta
+
+	wantError(t, e.commit("/f", a.UploadID, a.BlockID, 10, sum('a')), 409, "BLOCK_NOT_REPLICATED")
+	// Con el checksum de la copia distinta tampoco: solo 1 replica coincide.
+	wantError(t, e.commit("/f", a.UploadID, a.BlockID, 10, sum('f')), 409, "BLOCK_NOT_REPLICATED")
+}
+
+func TestCommitEstrictoRespetaElFactorConfigurado(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.ReplicationFactor = 2
+	a := e.mustAllocate("/f", 0, 10, "")
+	must(t, e.blocks.AddReplica(a.BlockID, "dn1", sum('a')))
+	must(t, e.blocks.AddReplica(a.BlockID, "dn2", sum('a')))
+	if c := e.mustCommit("/f", a.UploadID, a.BlockID, 10, sum('a')); c.Replicas != 2 {
+		t.Errorf("replicas = %d; quería 2", c.Replicas)
+	}
+}
+
+// Carrera ACK del cliente vs BlockReceived: las réplicas llegan mientras commit espera.
+func TestCommitEsperaLasReplicasQueLleganTarde(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 3 * time.Second
+	a := e.mustAllocate("/f", 0, 10, "")
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		for _, n := range []string{"dn1", "dn2", "dn3"} {
+			_ = e.blocks.AddReplica(a.BlockID, n, sum('a'))
+		}
+	}()
+	start := time.Now()
+	w := e.commit("/f", a.UploadID, a.BlockID, 10, sum('a'))
+	if w.Code != http.StatusOK {
+		t.Fatalf("commit: HTTP %d (%s)", w.Code, w.Body.String())
+	}
+	if d := time.Since(start); d < 60*time.Millisecond || d > 2*time.Second {
+		t.Errorf("commit tardó %v; debía esperar a las réplicas (~80 ms) y no agotar el máximo", d)
+	}
+}
+
+func TestCommitNoEsperaMasDelMaximo(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 120 * time.Millisecond
+	a := e.mustAllocate("/f", 0, 10, "")
+
+	start := time.Now()
+	wantError(t, e.commit("/f", a.UploadID, a.BlockID, 10, sum('a')), 409, "BLOCK_NOT_REPLICATED")
+	if d := time.Since(start); d < 100*time.Millisecond || d > 2*time.Second {
+		t.Errorf("commit tardó %v; quería ~120 ms", d)
+	}
+}
+
+func TestCommitSinEsperaConCommitWaitCero(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 0
+	a := e.mustAllocate("/f", 0, 10, "")
+	start := time.Now()
+	wantError(t, e.commit("/f", a.UploadID, a.BlockID, 10, sum('a')), 409, "BLOCK_NOT_REPLICATED")
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("con CommitWait=0 no debía esperar, tardó %v", d)
+	}
+}
+
+// Si el cliente cancela la petición, commit deja de esperar.
+func TestCommitSeCancelaConElCliente(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 10 * time.Second
+	a := e.mustAllocate("/f", 0, 10, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	body := fmt.Sprintf(`{"path":"/f","uploadId":%q,"blockId":%q,"size":10,"checksumSha256":%q}`,
+		a.UploadID, a.BlockID, sum('a'))
+	r := httptest.NewRequest("POST", "/files/commit", strings.NewReader(body)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	e.h.ServeHTTP(w, r)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("commit tardó %v tras cancelar el cliente", d)
+	}
+}
+
+// Mientras un commit espera réplicas no se bloquean las demás subidas.
+func TestCommitEnEsperaNoBloqueaOtrasSubidas(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 600 * time.Millisecond
+	a := e.mustAllocate("/lenta", 0, 10, "")
+
+	done := make(chan struct{})
+	go func() {
+		e.commit("/lenta", a.UploadID, a.BlockID, 10, sum('a')) // espera y termina en 409
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond) // deja que el commit entre en su espera
+
+	start := time.Now()
+	e.mustAllocate("/otra", 0, 10, "")
+	if d := time.Since(start); d > 300*time.Millisecond {
+		t.Errorf("allocate de otra subida tardó %v: el commit en espera la bloqueó", d)
+	}
+	<-done
+}
+
+// Dos commits idénticos simultáneos: se aplica uno y el otro responde lo mismo.
+func TestCommitsIdenticosSimultaneos(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	e.srv.CommitWait = 3 * time.Second
+	a := e.mustAllocate("/f", 0, 10, "")
+
+	codes := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() { codes <- e.commit("/f", a.UploadID, a.BlockID, 10, sum('a')).Code }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, n := range []string{"dn1", "dn2", "dn3"} {
+		must(t, e.blocks.AddReplica(a.BlockID, n, sum('a')))
+	}
+	for i := 0; i < 2; i++ {
+		if c := <-codes; c != 200 {
+			t.Errorf("commit simultáneo: HTTP %d; quería 200", c)
+		}
+	}
+	// El bloque se contó una sola vez: el siguiente tiene offset 10.
+	e.autoConfirm = true
+	b := e.mustAllocate("/f", 1, 5, a.UploadID)
+	if b.Offset != 10 {
+		t.Errorf("offset del bloque 1 = %d; quería 10", b.Offset)
+	}
+}
+
+// Un commit rechazado por falta de réplicas no impide reintentar el bloque con otro allocate.
+func TestCommitRechazadoPermiteReintentarElBloque(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	e.autoConfirm = false
+	a1 := e.mustAllocate("/f", 0, 10, "")
+	wantError(t, e.commit("/f", a1.UploadID, a1.BlockID, 10, sum('a')), 409, "BLOCK_NOT_REPLICATED")
+
+	a2 := e.mustAllocate("/f", 0, 10, a1.UploadID)
+	e.autoConfirm = true
+	e.mustCommit("/f", a1.UploadID, a2.BlockID, 10, sum('a'))
+	if w := e.finalize("/f", a1.UploadID); w.Code != 201 {
+		t.Errorf("finalize: HTTP %d", w.Code)
+	}
+}
+
+// finalize no vuelve a exigir 3 réplicas: si un DataNode cae después del commit,
+// la re-replicación lo repone y el put puede terminar (US-53, US-56).
+func TestFinalizeNoExigeReplicasDeNuevo(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	a := e.mustAllocate("/f", 0, 10, "")
+	e.mustCommit("/f", a.UploadID, a.BlockID, 10, sum('a'))
+	e.blocks.RemoveNode("auto-1") // un DataNode muere tras el commit
+
+	if w := e.finalize("/f", a.UploadID); w.Code != 201 {
+		t.Errorf("finalize: HTTP %d (%s); quería 201", w.Code, w.Body.String())
+	}
+}
+
+// finalize falla si el mapa de bloques perdió algún bloque del archivo.
+func TestFinalizeFallaSiUnBloqueNoEstaConfirmado(t *testing.T) {
+	e := newWriteEnv(t, 3)
+	a := e.mustAllocate("/f", 0, 10, "")
+	e.mustCommit("/f", a.UploadID, a.BlockID, 10, sum('a'))
+	e.blocks.RemoveBlock("/f", a.BlockID)
+
+	wantError(t, e.finalize("/f", a.UploadID), 409, "INCOMPLETE_FILE")
 }

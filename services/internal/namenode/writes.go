@@ -10,12 +10,14 @@
 package namenode
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // PipelineNode es un DataNode del pipeline de un bloque, tal como lo ve el
@@ -298,8 +300,12 @@ type commitResponse struct {
 
 // handleCommit confirma un bloque con su tamaño y checksum.
 //
-// En esta versión se acepta aunque el bloque tenga menos réplicas confirmadas
-// que el factor de réplica; la regla estricta 3 de 3 se añade en US-52.
+// Regla de consistencia estricta (RNF3): solo se acepta cuando los DataNodes ya
+// confirmaron (BlockReceived) ReplicationFactor réplicas con el mismo checksum
+// que envía el cliente. Como el aviso de los DataNodes puede llegar un instante
+// después del ACK del pipeline, se espera hasta CommitWait antes de responder
+// 409 BLOCK_NOT_REPLICATED. La espera se hace SIN el lock de subidas para no
+// bloquear otras escrituras; por eso el estado se valida antes y después.
 func (s *RESTServer) handleCommit(w http.ResponseWriter, r *http.Request, user string) {
 	var req commitRequest
 	if !decodeBody(w, r, &req) {
@@ -323,34 +329,30 @@ func (s *RESTServer) handleCommit(w http.ResponseWriter, r *http.Request, user s
 		return
 	}
 
+	// 1) Validar la petición antes de esperar.
+	s.up.mu.Lock()
+	_, applied, ok := s.checkCommit(w, req, norm, user)
+	s.up.mu.Unlock()
+	if !ok || applied {
+		return
+	}
+
+	// 2) Esperar las réplicas, sin el lock de subidas.
+	if n, ok := s.waitForReplicas(r.Context(), req.BlockID, req.ChecksumSha256, s.ReplicationFactor); !ok {
+		writeError(w, http.StatusConflict, codeBlockNotReplicated, fmt.Sprintf(
+			"el bloque %s tiene %d de %d réplicas confirmadas con el mismo checksum",
+			req.BlockID, n, s.ReplicationFactor))
+		return
+	}
+
+	// 3) Aplicar el commit. Se revalida porque el estado pudo cambiar mientras
+	// se esperaba (otro commit idéntico, o un allocate que reintentó el bloque).
 	s.up.mu.Lock()
 	defer s.up.mu.Unlock()
-
-	u, ok := s.lookupUpload(w, norm, req.UploadID, user)
-	if !ok {
+	u, applied, ok := s.checkCommit(w, req, norm, user)
+	if !ok || applied {
 		return
 	}
-
-	if u.pending == nil || u.pending.id != req.BlockID {
-		// ¿Reintento de un commit que ya se aplicó (se perdió la respuesta)?
-		for _, c := range u.committed {
-			if c.id == req.BlockID && c.size == req.Size && c.checksum == req.ChecksumSha256 {
-				writeJSON(w, http.StatusOK, commitResponse{
-					BlockID:  c.id,
-					Replicas: s.blocks.CountReplicas(c.id, c.checksum),
-				})
-				return
-			}
-		}
-		writeError(w, http.StatusNotFound, codeNotFound, "bloque desconocido o no asignado: "+req.BlockID)
-		return
-	}
-	if req.Size != u.pending.size {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf(
-			"size (%d) no coincide con el tamaño asignado (%d)", req.Size, u.pending.size))
-		return
-	}
-
 	if err := s.blocks.CommitBlock(req.BlockID, req.Size, req.ChecksumSha256); err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "error interno del servidor")
 		return
@@ -363,6 +365,67 @@ func (s *RESTServer) handleCommit(w http.ResponseWriter, r *http.Request, user s
 		BlockID:  req.BlockID,
 		Replicas: s.blocks.CountReplicas(req.BlockID, req.ChecksumSha256),
 	})
+}
+
+// checkCommit valida un commit contra el estado de la subida. Debe llamarse con
+// up.mu tomado. Si la petición no es válida ya respondió al cliente y devuelve
+// ok=false. Si el bloque ya estaba confirmado con los mismos datos (el cliente
+// repite un commit cuya respuesta se perdió) responde 200 y devuelve
+// applied=true.
+func (s *RESTServer) checkCommit(w http.ResponseWriter, req commitRequest, path, user string) (u *upload, applied, ok bool) {
+	u, ok = s.lookupUpload(w, path, req.UploadID, user)
+	if !ok {
+		return nil, false, false
+	}
+	if u.pending == nil || u.pending.id != req.BlockID {
+		for _, c := range u.committed {
+			if c.id == req.BlockID && c.size == req.Size && c.checksum == req.ChecksumSha256 {
+				writeJSON(w, http.StatusOK, commitResponse{
+					BlockID:  c.id,
+					Replicas: s.blocks.CountReplicas(c.id, c.checksum),
+				})
+				return u, true, true
+			}
+		}
+		writeError(w, http.StatusNotFound, codeNotFound, "bloque desconocido o no asignado: "+req.BlockID)
+		return nil, false, false
+	}
+	if req.Size != u.pending.size {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf(
+			"size (%d) no coincide con el tamaño asignado (%d)", req.Size, u.pending.size))
+		return nil, false, false
+	}
+	return u, false, true
+}
+
+// waitForReplicas espera hasta CommitWait a que el bloque tenga al menos
+// required réplicas con el checksum dado. Devuelve cuántas hay al terminar y si
+// se alcanzó el mínimo. Termina antes si el cliente cancela la petición.
+func (s *RESTServer) waitForReplicas(ctx context.Context, blockID, checksum string, required int) (int, bool) {
+	poll := s.CommitPollInterval
+	if poll <= 0 {
+		poll = 50 * time.Millisecond
+	}
+	deadline := time.Now().Add(s.CommitWait)
+	for {
+		n := s.blocks.CountReplicas(blockID, checksum)
+		if n >= required {
+			return n, true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return n, false
+		}
+		wait := poll
+		if remaining < wait {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return n, false
+		case <-time.After(wait):
+		}
+	}
 }
 
 // --- POST /files/finalize ---
@@ -407,6 +470,13 @@ func (s *RESTServer) handleFinalize(w http.ResponseWriter, r *http.Request, user
 		writeError(w, http.StatusConflict, codeIncompleteFile, fmt.Sprintf(
 			"el bloque %d fue asignado pero no confirmado", u.pending.index))
 		return
+	}
+	// Defensa: todos los bloques del archivo deben seguir confirmados en el mapa.
+	for _, c := range u.committed {
+		if info, ok := s.blocks.Block(c.id); !ok || !info.Committed() {
+			writeError(w, http.StatusConflict, codeIncompleteFile, "el bloque "+c.id+" no está confirmado")
+			return
+		}
 	}
 	if err := s.ns.CompleteFile(norm, u.committedSize); err != nil {
 		writeNamespaceError(w, err)

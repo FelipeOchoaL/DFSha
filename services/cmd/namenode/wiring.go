@@ -44,6 +44,7 @@ func newServers(cfg config) (http.Handler, *grpc.Server) {
 	rest := namenode.NewRESTServer(ns, blocks, registry)
 	rest.Nodes = registry
 	rest.ReplicationFactor = cfg.ReplicationFactor
+	rest.CommitWait = cfg.CommitWait
 
 	grpcServer := grpc.NewServer()
 	registerGRPC(grpcServer, ns, blocks)

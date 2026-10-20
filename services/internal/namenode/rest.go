@@ -20,22 +20,23 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 
 // Códigos de error estables de la API (ver sección 1.2 de api-rest.md).
 const (
-	codeInvalidRequest   = "INVALID_REQUEST"
-	codeInvalidPath      = "INVALID_PATH"
-	codeIsADirectory     = "IS_A_DIRECTORY"
-	codeUnauthorized     = "UNAUTHORIZED"
-	codeNotFound         = "NOT_FOUND"
-	codeParentNotFound   = "PARENT_NOT_FOUND"
-	codeAlreadyExists    = "ALREADY_EXISTS"
-	codeNotADirectory    = "NOT_A_DIRECTORY"
-	codeDirNotEmpty      = "DIRECTORY_NOT_EMPTY"
-	codeMethodNotAllowed = "METHOD_NOT_ALLOWED"
-	codeInternal         = "INTERNAL_ERROR"
-	codeForbidden        = "FORBIDDEN"
-	codeFileBeingWritten = "FILE_BEING_WRITTEN"
-	codeBlockOutOfOrder  = "BLOCK_OUT_OF_ORDER"
-	codeIncompleteFile   = "INCOMPLETE_FILE"
-	codeInsufficientDN   = "INSUFFICIENT_DATANODES"
+	codeInvalidRequest     = "INVALID_REQUEST"
+	codeInvalidPath        = "INVALID_PATH"
+	codeIsADirectory       = "IS_A_DIRECTORY"
+	codeUnauthorized       = "UNAUTHORIZED"
+	codeNotFound           = "NOT_FOUND"
+	codeParentNotFound     = "PARENT_NOT_FOUND"
+	codeAlreadyExists      = "ALREADY_EXISTS"
+	codeNotADirectory      = "NOT_A_DIRECTORY"
+	codeDirNotEmpty        = "DIRECTORY_NOT_EMPTY"
+	codeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
+	codeInternal           = "INTERNAL_ERROR"
+	codeForbidden          = "FORBIDDEN"
+	codeFileBeingWritten   = "FILE_BEING_WRITTEN"
+	codeBlockOutOfOrder    = "BLOCK_OUT_OF_ORDER"
+	codeIncompleteFile     = "INCOMPLETE_FILE"
+	codeInsufficientDN     = "INSUFFICIENT_DATANODES"
+	codeBlockNotReplicated = "BLOCK_NOT_REPLICATED"
 )
 
 // anonymousUser es el usuario que se asume mientras no exista autenticación.
@@ -51,6 +52,16 @@ type RESTServer struct {
 	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
 	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
 	ReplicationFactor int
+
+	// CommitWait es el tiempo máximo que commit espera a que los DataNodes confirmen
+	// (BlockReceived) las réplicas de un bloque antes de responder 409
+	// BLOCK_NOT_REPLICATED. Absorbe la carrera entre el ACK del pipeline al cliente
+	// y el aviso de los DataNodes al NameNode. Por defecto 3 s.
+	CommitWait time.Duration
+
+	// CommitPollInterval es cada cuánto commit revisa si ya llegaron las réplicas
+	// mientras espera. Por defecto 50 ms.
+	CommitPollInterval time.Duration
 
 	// Nodes informa qué DataNodes están vivos y cuál es su dirección. Lo usa
 	// /files/locations; debe asignarse antes de servir peticiones (lo implementa el
@@ -71,12 +82,14 @@ type RESTServer struct {
 // decide en qué DataNodes va cada bloque (lo implementa placement.go, US-24).
 func NewRESTServer(ns *Namespace, blocks *BlockMap, placer BlockPlacer) *RESTServer {
 	return &RESTServer{
-		ns:                ns,
-		blocks:            blocks,
-		placer:            placer,
-		up:                newUploadTable(),
-		ReplicationFactor: 3,
-		Authenticate:      func(*http.Request) (string, error) { return anonymousUser, nil },
+		ns:                 ns,
+		blocks:             blocks,
+		placer:             placer,
+		up:                 newUploadTable(),
+		ReplicationFactor:  3,
+		CommitWait:         3 * time.Second,
+		CommitPollInterval: 50 * time.Millisecond,
+		Authenticate:       func(*http.Request) (string, error) { return anonymousUser, nil },
 	}
 }
 

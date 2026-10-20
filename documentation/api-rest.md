@@ -54,8 +54,8 @@ Toda respuesta con código HTTP 4xx o 5xx tiene este cuerpo:
 | 409 | `NOT_A_DIRECTORY` | Se esperaba un directorio y la ruta (o un padre) es un archivo. |
 | 409 | `DIRECTORY_NOT_EMPTY` | `rmdir` sobre un directorio con contenido. |
 | 409 | `BLOCK_OUT_OF_ORDER` | `allocate` de un `blockIndex` que no es el siguiente esperado. |
-| 409 | `BLOCK_NOT_REPLICATED` | `commit` de un bloque que aún no tiene todas sus réplicas confirmadas con el mismo checksum (regla estricta, ver sección 4.5). |
-| 409 | `INCOMPLETE_FILE` | `finalize` de un archivo con bloques sin confirmar o sin bloques en orden. |
+| 409 | `BLOCK_NOT_REPLICATED` | `commit` de un bloque que aún no tiene `REPLICATION_FACTOR` réplicas confirmadas con el mismo checksum, tras esperar el tiempo máximo (ver sección 5.5). El cliente debe reintentar el bloque con un nuevo `allocate`. |
+| 409 | `INCOMPLETE_FILE` | `finalize` de un archivo con un bloque asignado pero sin confirmar (sin `commit`). |
 | 405 | `METHOD_NOT_ALLOWED` | Se usó un método HTTP distinto al del endpoint. La respuesta incluye la cabecera `Allow`. Una ruta desconocida responde `404 NOT_FOUND`. |
 | 500 | `INTERNAL_ERROR` | Error inesperado del servidor. |
 | 503 | `NAMENODE_STANDBY` | El NameNode contactado es el standby (ver sección 1.4). |
@@ -326,7 +326,7 @@ Cierra el archivo: pasa a `COMPLETE` y calcula su tamaño total.
 }
 ```
 
-**Errores:** `400 INVALID_REQUEST`, `401`, `403`, `404 NOT_FOUND`, `409 FILE_BEING_WRITTEN` (`uploadId` no coincide), `409 INCOMPLETE_FILE`, `409 BLOCK_NOT_REPLICATED`, `409 ALREADY_EXISTS` (ya estaba `COMPLETE`), `503 NAMENODE_STANDBY`.
+**Errores:** `400 INVALID_REQUEST`, `401`, `403`, `404 NOT_FOUND`, `409 FILE_BEING_WRITTEN` (`uploadId` no coincide), `409 INCOMPLETE_FILE`, `409 ALREADY_EXISTS` (ya estaba `COMPLETE`), `503 NAMENODE_STANDBY`.
 
 ### 5.4 Limpieza de subidas fallidas
 
@@ -338,9 +338,10 @@ Un bloque solo se acepta cuando **todas** sus réplicas existen con el mismo che
 
 - `commit` responde `409 BLOCK_NOT_REPLICATED` si el bloque no tiene `REPLICATION_FACTOR` réplicas confirmadas por `BlockReceived` con un checksum igual al enviado por el cliente.
 - Hay una carrera posible entre el ACK del pipeline al cliente y el aviso `BlockReceived` de los DataNodes al NameNode. Por eso el NameNode espera brevemente y reintenta internamente antes de responder `409`.
-- `finalize` falla con `409 INCOMPLETE_FILE` si algún bloque no está confirmado.
+- `commit` espera hasta `COMMIT_WAIT_MS` (por defecto 3000 ms) a que lleguen esos avisos antes de responder `409`, de modo que normalmente el cliente no ve la carrera. La respuesta indica cuántas réplicas hay (`"2 de 3"`).
+- `commit` es idempotente: repetirlo con el mismo `blockId`, `size` y `checksumSha256` devuelve `200` de nuevo.
+- `finalize` falla con `409 INCOMPLETE_FILE` si algún bloque está asignado pero sin confirmar. **No** vuelve a exigir las réplicas: si un DataNode cae después del `commit`, la re-replicación (US-56) restablece el factor y el `put` puede terminar.
 
-> Nota de implementación: en la primera versión (US-26) `commit` acepta aunque haya menos réplicas; esta regla estricta se activa con US-52. El contrato del cliente es el de este documento desde el principio.
 
 ---
 

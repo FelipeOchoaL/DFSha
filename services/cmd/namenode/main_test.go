@@ -20,7 +20,7 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3}
+	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3, CommitWait: 3 * time.Second}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -33,11 +33,12 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 		"REST_PORT":          "9090",
 		"GRPC_PORT":          "9000",
 		"REPLICATION_FACTOR": "2",
+		"COMMIT_WAIT_MS":     "250",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2}
+	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2, CommitWait: 250 * time.Millisecond}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -51,6 +52,8 @@ func TestLoadConfigInvalida(t *testing.T) {
 		"puertos iguales":          {"REST_PORT": "8080", "GRPC_PORT": "8080"},
 		"réplicas no numéricas":    {"REPLICATION_FACTOR": "tres"},
 		"réplicas cero":            {"REPLICATION_FACTOR": "0"},
+		"espera negativa":          {"COMMIT_WAIT_MS": "-1"},
+		"espera no numerica":       {"COMMIT_WAIT_MS": "x"},
 		"rol desconocido":          {"NAMENODE_ROLE": "primary"},
 		"standby aún no soportado": {"NAMENODE_ROLE": "standby"},
 	}

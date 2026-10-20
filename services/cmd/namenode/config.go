@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Valores por defecto. Los nombres de variable y los defaults coinciden con
@@ -16,6 +17,7 @@ const (
 	defaultRESTPort          = 8080
 	defaultGRPCPort          = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
 	defaultReplicationFactor = 3
+	defaultCommitWaitMS      = 3000 // espera maxima de commit por las replicas (US-52)
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -27,11 +29,12 @@ const (
 
 // config es la configuración del NameNode, leída de variables de entorno.
 type config struct {
-	NodeID            string // NODE_ID
-	Role              string // NAMENODE_ROLE: active | standby
-	RESTPort          int    // REST_PORT
-	GRPCPort          int    // GRPC_PORT
-	ReplicationFactor int    // REPLICATION_FACTOR
+	NodeID            string        // NODE_ID
+	Role              string        // NAMENODE_ROLE: active | standby
+	RESTPort          int           // REST_PORT
+	GRPCPort          int           // GRPC_PORT
+	ReplicationFactor int           // REPLICATION_FACTOR
+	CommitWait        time.Duration // COMMIT_WAIT_MS: milisegundos que commit espera las replicas
 }
 
 // loadConfig lee la configuración usando getenv (os.Getenv en producción).
@@ -56,6 +59,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.ReplicationFactor <= 0 {
 		return config{}, fmt.Errorf("REPLICATION_FACTOR debe ser mayor que 0")
 	}
+	waitMS, err := envInt(getenv, "COMMIT_WAIT_MS", defaultCommitWaitMS)
+	if err != nil {
+		return config{}, err
+	}
+	if waitMS < 0 {
+		return config{}, fmt.Errorf("COMMIT_WAIT_MS no puede ser negativo")
+	}
+	cfg.CommitWait = time.Duration(waitMS) * time.Millisecond
+
 	switch cfg.Role {
 	case roleActive:
 	case roleStandby:
