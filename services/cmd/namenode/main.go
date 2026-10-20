@@ -57,6 +57,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	go checkpointLoop(ctx, rest, cfg.SnapshotInterval)
+	go rest.RunStandbySync(ctx, cfg.HASyncInterval)
 	serveErr := serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer)
 
 	if err := rest.Checkpoint(); err != nil {

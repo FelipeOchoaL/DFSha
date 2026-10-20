@@ -55,6 +55,15 @@ func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
 		}
 	}
 
+	if cfg.Role == roleStandby {
+		rest.SetStandby(true) // responde 503 a toda la API REST hasta que se promueva (US-72)
+	} else if client := newStandbyClient(cfg); client != nil {
+		opts := namenode.ReplicatorOptions{Timeout: cfg.HATimeout, BestEffort: !cfg.HARequireAck}
+		if _, err := rest.AttachStandby(client, opts); err != nil {
+			return nil, nil, fmt.Errorf("activar la replicacion al standby: %w", err)
+		}
+	}
+
 	grpcServer := grpc.NewServer()
 	registerGRPC(grpcServer, ns, blocks)
 
@@ -65,3 +74,17 @@ func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
 // ninguno: el contrato (proto/namenode.proto, US-03) y su código generado
 // (US-04) aún no están en main.
 func registerGRPC(_ *grpc.Server, _ *namenode.Namespace, _ *namenode.BlockMap) {}
+
+// newStandbyClient crea el cliente que envía el edit log al NameNode standby,
+// o nil si no hay ninguno. Hoy devuelve nil porque falta el código generado del
+// servicio NameNodeHA (proto/namenode.proto, US-03 y US-04). Al integrarlo debe
+// devolver un cliente gRPC que implemente namenode.StandbyClient:
+//
+// ReplicateEditLog(ctx, entries) -> traduce []EditEntry a ReplicateEditLogRequest,
+// devuelve el last_applied_txid de la respuesta y, si el standby rechazó las
+// entradas por un hueco, ese txid junto con un error que envuelva
+// namenode.ErrReplicationGap.
+//
+// En el standby, el servicio gRPC del mismo nombre llama a
+// (*namenode.RESTServer).ReplicateEditLog con las entradas recibidas.
+func newStandbyClient(cfg config) namenode.StandbyClient { return nil }

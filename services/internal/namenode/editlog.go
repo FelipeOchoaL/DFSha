@@ -118,8 +118,8 @@ func OpenEditLog(dir string) (*EditLog, []EditEntry, error) {
 
 // readEditEntries lee todas las entradas válidas. Devuelve también el número de
 // bytes que ocupan (el resto del archivo es una escritura incompleta).
-func readEditEntries(f *os.File) ([]EditEntry, int64, error) {
-	r := bufio.NewReader(f)
+func readEditEntries(src io.Reader) ([]EditEntry, int64, error) {
+	r := bufio.NewReader(src)
 	var entries []EditEntry
 	var valid int64
 	for lineNo := 1; ; lineNo++ {
@@ -240,4 +240,56 @@ func (l *EditLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.f.Close()
+}
+
+// AppendReplicated escribe una entrada que viene del NameNode activo (standby):
+// conserva el txid original, que debe ser exactamente el siguiente. No llama a
+// OnAppend.
+func (l *EditLog) AppendReplicated(e EditEntry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.failed != nil {
+		return fmt.Errorf("el edit log no se puede usar: %w", l.failed)
+	}
+	if e.TxID != l.next {
+		return fmt.Errorf("txid %d fuera de orden: se esperaba el %d", e.TxID, l.next)
+	}
+	data, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if _, err := l.f.Write(data); err != nil {
+		l.failed = err
+		return fmt.Errorf("escribir en el edit log: %w", err)
+	}
+	if err := l.f.Sync(); err != nil {
+		l.failed = err
+		return fmt.Errorf("sincronizar el edit log: %w", err)
+	}
+	l.next++
+	l.sinceCheckpoint++
+	return nil
+}
+
+// SetOnAppend fija la función que recibe cada entrada guardada (ver OnAppend).
+func (l *EditLog) SetOnAppend(f func(EditEntry) error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.OnAppend = f
+}
+
+// Entries devuelve las entradas que hay ahora mismo en el archivo (las posteriores
+// al último snapshot), en orden.
+func (l *EditLog) Entries() ([]EditEntry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	f, err := os.Open(filepath.Join(l.dir, editLogFileName))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, _, err := readEditEntries(f)
+	return entries, err
 }

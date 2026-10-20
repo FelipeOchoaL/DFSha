@@ -21,6 +21,8 @@ const (
 	defaultMetaDir             = "./data/meta" // edit log y snapshot (US-70); el directorio data/ no se sube a git
 	defaultSnapshotEvery       = 1000          // operaciones entre snapshots; 0 = solo por tiempo
 	defaultSnapshotIntervalSec = 300           // segundos entre snapshots periodicos; 0 = desactivado
+	defaultHATimeoutMS         = 2000          // espera maxima del ACK del standby (US-71)
+	defaultHASyncIntervalSec   = 5             // cada cuanto el activo pone al dia al standby; 0 = desactivado
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -41,6 +43,9 @@ type config struct {
 	MetaDir           string        // META_DIR: donde se guardan el edit log y el snapshot; vacio = sin persistencia
 	SnapshotEvery     int           // SNAPSHOT_EVERY: operaciones entre snapshots
 	SnapshotInterval  time.Duration // SNAPSHOT_INTERVAL_SEC: tiempo entre snapshots periodicos
+	HARequireAck      bool          // HA_REQUIRE_ACK: el cliente solo recibe confirmacion si el standby aplico la operacion
+	HATimeout         time.Duration // HA_TIMEOUT_MS: espera maxima del ACK del standby
+	HASyncInterval    time.Duration // HA_SYNC_INTERVAL_SEC: cada cuanto se pone al dia al standby
 }
 
 // loadConfig lee la configuración usando getenv (os.Getenv en producción).
@@ -86,10 +91,26 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg.SnapshotInterval = time.Duration(intervalSec) * time.Second
 
+	if cfg.HARequireAck, err = envBool(getenv, "HA_REQUIRE_ACK", true); err != nil {
+		return config{}, err
+	}
+	haTimeoutMS, err := envNonNegative(getenv, "HA_TIMEOUT_MS", defaultHATimeoutMS)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.HATimeout = time.Duration(haTimeoutMS) * time.Millisecond
+	haSyncSec, err := envNonNegative(getenv, "HA_SYNC_INTERVAL_SEC", defaultHASyncIntervalSec)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.HASyncInterval = time.Duration(haSyncSec) * time.Second
+
 	switch cfg.Role {
 	case roleActive:
 	case roleStandby:
-		return config{}, fmt.Errorf("NAMENODE_ROLE=standby aún no está soportado (llega con US-71/US-72)")
+		if cfg.MetaDir == "" {
+			return config{}, fmt.Errorf("NAMENODE_ROLE=standby requiere persistencia: META_DIR no puede estar desactivado")
+		}
 	default:
 		return config{}, fmt.Errorf("NAMENODE_ROLE debe ser %q o %q, no %q", roleActive, roleStandby, cfg.Role)
 	}
@@ -142,6 +163,18 @@ func envNonNegative(getenv func(string) string, key string, fallback int) (int, 
 	}
 	if v < 0 {
 		return 0, fmt.Errorf("%s no puede ser negativo", key)
+	}
+	return v, nil
+}
+
+func envBool(getenv func(string) string, key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s debe ser true o false: %w", key, err)
 	}
 	return v, nil
 }

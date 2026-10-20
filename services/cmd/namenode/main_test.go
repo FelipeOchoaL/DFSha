@@ -24,7 +24,8 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3,
-		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second}
+		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
+		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -46,7 +47,8 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2,
-		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute}
+		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
+		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -54,19 +56,22 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 
 func TestLoadConfigInvalida(t *testing.T) {
 	casos := map[string]map[string]string{
-		"puerto no numérico":       {"REST_PORT": "abc"},
-		"puerto fuera de rango":    {"GRPC_PORT": "70000"},
-		"puerto cero":              {"REST_PORT": "0"},
-		"puertos iguales":          {"REST_PORT": "8080", "GRPC_PORT": "8080"},
-		"réplicas no numéricas":    {"REPLICATION_FACTOR": "tres"},
-		"réplicas cero":            {"REPLICATION_FACTOR": "0"},
-		"snapshot negativo":        {"SNAPSHOT_EVERY": "-1"},
-		"intervalo negativo":       {"SNAPSHOT_INTERVAL_SEC": "-5"},
-		"intervalo no numerico":    {"SNAPSHOT_INTERVAL_SEC": "x"},
-		"espera negativa":          {"COMMIT_WAIT_MS": "-1"},
-		"espera no numerica":       {"COMMIT_WAIT_MS": "x"},
-		"rol desconocido":          {"NAMENODE_ROLE": "primary"},
-		"standby aún no soportado": {"NAMENODE_ROLE": "standby"},
+		"puerto no numérico":            {"REST_PORT": "abc"},
+		"puerto fuera de rango":         {"GRPC_PORT": "70000"},
+		"puerto cero":                   {"REST_PORT": "0"},
+		"puertos iguales":               {"REST_PORT": "8080", "GRPC_PORT": "8080"},
+		"réplicas no numéricas":         {"REPLICATION_FACTOR": "tres"},
+		"réplicas cero":                 {"REPLICATION_FACTOR": "0"},
+		"snapshot negativo":             {"SNAPSHOT_EVERY": "-1"},
+		"intervalo negativo":            {"SNAPSHOT_INTERVAL_SEC": "-5"},
+		"intervalo no numerico":         {"SNAPSHOT_INTERVAL_SEC": "x"},
+		"espera negativa":               {"COMMIT_WAIT_MS": "-1"},
+		"espera no numerica":            {"COMMIT_WAIT_MS": "x"},
+		"rol desconocido":               {"NAMENODE_ROLE": "primary"},
+		"standby sin persistencia":      {"NAMENODE_ROLE": "standby", "META_DIR": "-"},
+		"HA_REQUIRE_ACK invalido":       {"HA_REQUIRE_ACK": "quizas"},
+		"HA_TIMEOUT_MS invalido":        {"HA_TIMEOUT_MS": "x"},
+		"HA_SYNC_INTERVAL_SEC negativo": {"HA_SYNC_INTERVAL_SEC": "-1"},
 	}
 	for nombre, vars := range casos {
 		if _, err := loadConfig(env(vars)); err == nil {
@@ -314,5 +319,60 @@ func TestNoArrancaConMetadatosCorruptos(t *testing.T) {
 	if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.RESTPort), 300*time.Millisecond); err == nil {
 		c.Close()
 		t.Error("no debía abrirse el puerto REST")
+	}
+}
+
+func TestLoadConfigStandbyYOpcionesDeHA(t *testing.T) {
+	cfg, err := loadConfig(env(map[string]string{
+		"NAMENODE_ROLE":        "standby",
+		"HA_REQUIRE_ACK":       "false",
+		"HA_TIMEOUT_MS":        "500",
+		"HA_SYNC_INTERVAL_SEC": "0",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Role != roleStandby || cfg.HARequireAck || cfg.HATimeout != 500*time.Millisecond || cfg.HASyncInterval != 0 {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+// Un NameNode standby arranca, pero responde 503 a toda la API REST.
+func TestStandbyArrancaYResponde503(t *testing.T) {
+	cfg := config{
+		NodeID: "nn-standby", Role: roleStandby, ReplicationFactor: 3,
+		RESTPort: freePort(t), GRPCPort: freePort(t), MetaDir: t.TempDir(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- run(ctx, cfg) }()
+	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.RESTPort)
+
+	var resp *http.Response
+	var err error
+	for i := 0; i < 200; i++ {
+		if resp, err = http.Get(base + "/fs/ls"); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		cancel()
+		t.Fatalf("el standby no arrancó: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "NAMENODE_STANDBY") ||
+		resp.Header.Get("Retry-After") != "1" {
+		t.Errorf("standby: HTTP %d, Retry-After %q, %s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Errorf("run devolvió %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run no terminó")
 	}
 }

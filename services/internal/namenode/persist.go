@@ -158,13 +158,20 @@ func (s *RESTServer) journal(e *EditEntry) error {
 	if err := s.log.Append(e); err != nil {
 		return err
 	}
-	if s.snapshotEvery > 0 && s.log.SinceCheckpoint() >= s.snapshotEvery {
-		if err := s.checkpointLocked(); err != nil {
-			// No es fatal: el log sigue teniendo todo; se reintenta en la próxima.
-			log.Printf("AVISO: no se pudo guardar el snapshot: %v", err)
-		}
-	}
+	s.maybeCheckpoint()
 	return nil
+}
+
+// maybeCheckpoint guarda un snapshot si ya se acumularon snapshotEvery entradas.
+// Con up.mu tomado.
+func (s *RESTServer) maybeCheckpoint() {
+	if s.log == nil || s.snapshotEvery <= 0 || s.log.SinceCheckpoint() < s.snapshotEvery {
+		return
+	}
+	if err := s.checkpointLocked(); err != nil {
+		// No es fatal: el log sigue teniendo todo; se reintenta en la proxima.
+		log.Printf("AVISO: no se pudo guardar el snapshot: %v", err)
+	}
 }
 
 // --- snapshot ---

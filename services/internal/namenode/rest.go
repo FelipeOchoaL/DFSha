@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,6 +51,8 @@ type RESTServer struct {
 	up            uploadTable // subidas en curso (ver writes.go)
 	log           *EditLog    // edit log persistente; nil si la persistencia no esta activada (persist.go)
 	snapshotEvery int         // cada cuantas operaciones se guarda un snapshot
+	standby       atomic.Bool // true si este NameNode es standby (ha.go)
+	replicator    *Replicator // replicacion al standby; nil si no esta activada (ha.go)
 
 	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
 	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
@@ -114,7 +117,7 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
 	})
-	return mux
+	return s.standbyGuard(mux)
 }
 
 // handlerFunc es un handler que ya recibe al usuario autenticado.
