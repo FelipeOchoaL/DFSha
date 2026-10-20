@@ -1,3 +1,257 @@
 // API REST para clientes: /auth/login, /fs/ls, /fs/mkdir, /fs/rm,
-// /files/allocate, /files/commit, /files/finalize, /files/{path}/locations.
+// /files/allocate, /files/commit, /files/finalize, /files/locations.
+// El contrato exacto está en documentation/api-rest.md.
+//
+// Estado actual (US-25): /fs/ls, /fs/mkdir y /fs/rmdir.
 package namenode
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"time"
+)
+
+// maxBodyBytes limita el tamaño del body JSON que aceptamos en las peticiones.
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// Códigos de error estables de la API (ver sección 1.2 de api-rest.md).
+const (
+	codeInvalidRequest   = "INVALID_REQUEST"
+	codeInvalidPath      = "INVALID_PATH"
+	codeIsADirectory     = "IS_A_DIRECTORY"
+	codeUnauthorized     = "UNAUTHORIZED"
+	codeNotFound         = "NOT_FOUND"
+	codeParentNotFound   = "PARENT_NOT_FOUND"
+	codeAlreadyExists    = "ALREADY_EXISTS"
+	codeNotADirectory    = "NOT_A_DIRECTORY"
+	codeDirNotEmpty      = "DIRECTORY_NOT_EMPTY"
+	codeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	codeInternal         = "INTERNAL_ERROR"
+)
+
+// anonymousUser es el usuario que se asume mientras no exista autenticación.
+const anonymousUser = "anonymous"
+
+// RESTServer expone el namespace por HTTP/JSON.
+type RESTServer struct {
+	ns *Namespace
+
+	// Authenticate identifica al usuario de una petición. Si devuelve error la
+	// petición se rechaza con 401 UNAUTHORIZED.
+	//
+	// ATENCIÓN: por defecto NO valida nada y todas las peticiones son del usuario
+	// "anonymous". Hasta que exista el login con JWT (US-80, David) esta API no
+	// tiene autenticación ni control de acceso: no debe exponerse fuera de un
+	// entorno de desarrollo. US-80 reemplaza esta función por la que valida el token.
+	Authenticate func(r *http.Request) (user string, err error)
+}
+
+// NewRESTServer crea el servidor REST sobre un namespace.
+func NewRESTServer(ns *Namespace) *RESTServer {
+	return &RESTServer{
+		ns:           ns,
+		Authenticate: func(*http.Request) (string, error) { return anonymousUser, nil },
+	}
+}
+
+// Handler devuelve el http.Handler con todas las rutas registradas.
+func (s *RESTServer) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fs/ls", s.route(http.MethodGet, s.handleLs))
+	mux.HandleFunc("/fs/mkdir", s.route(http.MethodPost, s.handleMkdir))
+	mux.HandleFunc("/fs/rmdir", s.route(http.MethodDelete, s.handleRmdir))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
+	})
+	return mux
+}
+
+// handlerFunc es un handler que ya recibe al usuario autenticado.
+type handlerFunc func(w http.ResponseWriter, r *http.Request, user string)
+
+// route valida el método HTTP, autentica la petición y llama al handler. Los
+// errores salen en el formato común {"error", "code"}.
+func (s *RESTServer) route(method string, h handlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			w.Header().Set("Allow", method)
+			writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed,
+				"método no permitido: use "+method)
+			return
+		}
+		user, err := s.Authenticate(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, err.Error())
+			return
+		}
+		h(w, r, user)
+	}
+}
+
+// --- /fs/ls ---
+
+type entryJSON struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	Owner      string `json:"owner"`
+	ModifiedAt string `json:"modifiedAt"`
+	State      string `json:"state,omitempty"` // solo archivos
+}
+
+type lsResponse struct {
+	Path    string      `json:"path"`
+	Entries []entryJSON `json:"entries"`
+}
+
+// handleLs: GET /fs/ls?path=<ruta>. Sin path lista "/".
+func (s *RESTServer) handleLs(w http.ResponseWriter, r *http.Request, _ string) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		p = "/"
+	}
+	norm, err := NormalizePath(p)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	entries, err := s.ns.List(norm)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	resp := lsResponse{Path: norm, Entries: make([]entryJSON, 0, len(entries))}
+	for _, e := range entries {
+		resp.Entries = append(resp.Entries, entryJSON{
+			Name:       e.Name,
+			Type:       string(e.Type),
+			Size:       e.Size,
+			Owner:      e.Owner,
+			ModifiedAt: e.ModTime.UTC().Format(time.RFC3339),
+			State:      string(e.State),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- /fs/mkdir ---
+
+type mkdirRequest struct {
+	Path    string `json:"path"`
+	Parents bool   `json:"parents"`
+}
+
+type pathResponse struct {
+	Path string `json:"path"`
+}
+
+// handleMkdir: POST /fs/mkdir {"path": "...", "parents": false}.
+// 201 si se creó; 200 si parents=true y el directorio ya existía.
+func (s *RESTServer) handleMkdir(w http.ResponseWriter, r *http.Request, user string) {
+	var req mkdirRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el campo obligatorio: path")
+		return
+	}
+	norm, err := NormalizePath(req.Path)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	// Solo para elegir entre 201 y 200; si otro cliente lo crea en medio, el
+	// único efecto es que respondemos 201 en vez de 200.
+	existed := false
+	if req.Parents {
+		if e, err := s.ns.Stat(norm); err == nil && e.Type == TypeDir {
+			existed = true
+		}
+	}
+	if err := s.ns.Mkdir(norm, user, req.Parents); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if existed {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, pathResponse{Path: norm})
+}
+
+// --- /fs/rmdir ---
+
+// handleRmdir: DELETE /fs/rmdir?path=<ruta>. Solo directorios vacíos.
+func (s *RESTServer) handleRmdir(w http.ResponseWriter, r *http.Request, _ string) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el parámetro obligatorio: path")
+		return
+	}
+	if err := s.ns.Rmdir(p); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- utilidades de respuesta ---
+
+type errorJSON struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, errorJSON{Error: msg, Code: code})
+}
+
+// writeNamespaceError traduce los errores del namespace a HTTP.
+func writeNamespaceError(w http.ResponseWriter, err error) {
+	status, code := http.StatusInternalServerError, codeInternal
+	switch {
+	case errors.Is(err, ErrInvalidPath):
+		status, code = http.StatusBadRequest, codeInvalidPath
+	case errors.Is(err, ErrIsDirectory):
+		status, code = http.StatusBadRequest, codeIsADirectory
+	case errors.Is(err, ErrNotFound):
+		status, code = http.StatusNotFound, codeNotFound
+	case errors.Is(err, ErrParentNotFound):
+		status, code = http.StatusNotFound, codeParentNotFound
+	case errors.Is(err, ErrAlreadyExists):
+		status, code = http.StatusConflict, codeAlreadyExists
+	case errors.Is(err, ErrNotDirectory):
+		status, code = http.StatusConflict, codeNotADirectory
+	case errors.Is(err, ErrNotEmpty):
+		status, code = http.StatusConflict, codeDirNotEmpty
+	}
+	msg := err.Error()
+	if status == http.StatusInternalServerError {
+		msg = "error interno del servidor" // no filtrar detalles al cliente
+	}
+	writeError(w, status, code, msg)
+}
+
+// decodeBody lee el body JSON en v. Si es inválido responde 400 y devuelve false.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err := dec.Decode(v); err != nil {
+		msg := "el body no es un JSON válido"
+		if errors.Is(err, io.EOF) {
+			msg = "falta el body JSON"
+		}
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return false
+	}
+	return true
+}

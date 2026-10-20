@@ -56,6 +56,7 @@ Toda respuesta con código HTTP 4xx o 5xx tiene este cuerpo:
 | 409 | `BLOCK_OUT_OF_ORDER` | `allocate` de un `blockIndex` que no es el siguiente esperado. |
 | 409 | `BLOCK_NOT_REPLICATED` | `commit` de un bloque que aún no tiene todas sus réplicas confirmadas con el mismo checksum (regla estricta, ver sección 4.5). |
 | 409 | `INCOMPLETE_FILE` | `finalize` de un archivo con bloques sin confirmar o sin bloques en orden. |
+| 405 | `METHOD_NOT_ALLOWED` | Se usó un método HTTP distinto al del endpoint. La respuesta incluye la cabecera `Allow`. Una ruta desconocida responde `404 NOT_FOUND`. |
 | 500 | `INTERNAL_ERROR` | Error inesperado del servidor. |
 | 503 | `NAMENODE_STANDBY` | El NameNode contactado es el standby (ver sección 1.4). |
 | 503 | `INSUFFICIENT_DATANODES` | No hay suficientes DataNodes vivos para cumplir el factor de réplica. |
