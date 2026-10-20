@@ -15,6 +15,8 @@ import (
 //   - Registro de DataNodes y colocación (US-22, US-24; David): reemplazar
 //     noDataNodes por el registro real. Debe implementar namenode.BlockPlacer
 //     (Place) y namenode.NodeDirectory (LiveNode).
+//   - Cola de comandos de los DataNodes (US-22; David): asignar rest.Deletes
+//     (namenode.BlockDeleter) para que /fs/rm ordene el borrado de bloques.
 //   - Servicio gRPC NameNode (US-22, US-23; David): registrarlo en registerGRPC.
 //   - Servicio gRPC NameNodeHA (US-71; James): registrarlo en registerGRPC.
 //   - Autenticación JWT (US-80; David): asignar rest.Authenticate.

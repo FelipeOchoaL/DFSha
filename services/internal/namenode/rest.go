@@ -68,6 +68,11 @@ type RESTServer struct {
 	// registro de DataNodes, US-22).
 	Nodes NodeDirectory
 
+	// Deletes recibe las órdenes de borrado de bloques que genera /fs/rm (lo
+	// implementa la cola de comandos del registro de DataNodes, US-22). Si es nil,
+	// rm no encola nada y los bloques los limpia el block report (US-58).
+	Deletes BlockDeleter
+
 	// Authenticate identifica al usuario de una petición. Si devuelve error la
 	// petición se rechaza con 401 UNAUTHORIZED.
 	//
@@ -103,6 +108,7 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("/files/commit", s.route(http.MethodPost, s.handleCommit))
 	mux.HandleFunc("/files/finalize", s.route(http.MethodPost, s.handleFinalize))
 	mux.HandleFunc("/files/locations", s.route(http.MethodGet, s.handleLocations))
+	mux.HandleFunc("/fs/rm", s.route(http.MethodDelete, s.handleRm))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
 	})
