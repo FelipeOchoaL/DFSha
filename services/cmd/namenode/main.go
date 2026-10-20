@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"dfsha/services/internal/namenode"
+
 	"google.golang.org/grpc"
 )
 
@@ -33,8 +35,17 @@ func main() {
 	}
 }
 
-// run abre los puertos y sirve hasta que ctx se cancele o un servidor falle.
+// run recupera los metadatos, abre los puertos y sirve hasta que ctx se cancele
+// o un servidor falle. Al terminar guarda un snapshot final para que el próximo
+// arranque no tenga que reproducir el edit log.
 func run(ctx context.Context, cfg config) error {
+	// Primero los metadatos: si no se pueden recuperar no se abre ningún puerto.
+	rest, grpcServer, err := newServers(cfg)
+	if err != nil {
+		return err
+	}
+	defer rest.Close()
+
 	restLn, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.RESTPort))
 	if err != nil {
 		return fmt.Errorf("escuchar REST en :%d: %w", cfg.RESTPort, err)
@@ -44,8 +55,34 @@ func run(ctx context.Context, cfg config) error {
 		_ = restLn.Close()
 		return fmt.Errorf("escuchar gRPC en :%d: %w", cfg.GRPCPort, err)
 	}
-	handler, grpcServer := newServers(cfg)
-	return serve(ctx, cfg, restLn, grpcLn, handler, grpcServer)
+
+	go checkpointLoop(ctx, rest, cfg.SnapshotInterval)
+	serveErr := serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer)
+
+	if err := rest.Checkpoint(); err != nil {
+		log.Printf("AVISO: no se pudo guardar el snapshot final: %v", err)
+	}
+	return serveErr
+}
+
+// checkpointLoop guarda un snapshot cada every mientras ctx esté activo
+// (every <= 0 lo desactiva). Checkpoint no hace nada si no hubo cambios.
+func checkpointLoop(ctx context.Context, rest *namenode.RESTServer, every time.Duration) {
+	if every <= 0 {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := rest.Checkpoint(); err != nil {
+				log.Printf("AVISO: no se pudo guardar el snapshot periódico: %v", err)
+			}
+		}
+	}
 }
 
 // serve atiende REST y gRPC al mismo tiempo. Devuelve nil si terminó porque ctx

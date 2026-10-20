@@ -44,10 +44,12 @@ const anonymousUser = "anonymous"
 
 // RESTServer expone el namespace por HTTP/JSON.
 type RESTServer struct {
-	ns     *Namespace
-	blocks *BlockMap
-	placer BlockPlacer
-	up     uploadTable // subidas en curso (ver writes.go)
+	ns            *Namespace
+	blocks        *BlockMap
+	placer        BlockPlacer
+	up            uploadTable // subidas en curso (ver writes.go)
+	log           *EditLog    // edit log persistente; nil si la persistencia no esta activada (persist.go)
+	snapshotEvery int         // cada cuantas operaciones se guarda un snapshot
 
 	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
 	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
@@ -211,21 +213,26 @@ func (s *RESTServer) handleMkdir(w http.ResponseWriter, r *http.Request, user st
 		return
 	}
 
-	// Solo para elegir entre 201 y 200; si otro cliente lo crea en medio, el
-	// único efecto es que respondemos 201 en vez de 200.
+	// Las mutaciones se serializan con up.mu: ver persist.go.
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
 	existed := false
 	if req.Parents {
 		if e, err := s.ns.Stat(norm); err == nil && e.Type == TypeDir {
 			existed = true
 		}
 	}
-	if err := s.ns.Mkdir(norm, user, req.Parents); err != nil {
+	entry := EditEntry{Op: OpMkdir, Time: s.stamp(), Path: norm, Owner: user, Parents: req.Parents}
+	if err := s.applyMkdir(entry); err != nil {
 		writeNamespaceError(w, err)
 		return
 	}
 	status := http.StatusCreated
 	if existed {
-		status = http.StatusOK
+		status = http.StatusOK // mkdir -p de un directorio existente: no cambia nada, no se registra
+	} else if !s.record(w, &entry) {
+		return
 	}
 	writeJSON(w, status, pathResponse{Path: norm})
 }
@@ -239,8 +246,21 @@ func (s *RESTServer) handleRmdir(w http.ResponseWriter, r *http.Request, _ strin
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el parámetro obligatorio: path")
 		return
 	}
-	if err := s.ns.Rmdir(p); err != nil {
+	norm, err := NormalizePath(p)
+	if err != nil {
 		writeNamespaceError(w, err)
+		return
+	}
+
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	entry := EditEntry{Op: OpRmdir, Time: s.stamp(), Path: norm}
+	if err := s.applyRmdir(entry); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	if !s.record(w, &entry) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

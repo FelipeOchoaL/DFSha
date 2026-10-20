@@ -41,13 +41,16 @@ func (s *RESTServer) handleRm(w http.ResponseWriter, r *http.Request, user strin
 		writeError(w, http.StatusForbidden, codeForbidden, "la subida pertenece a otro usuario: "+norm)
 		return
 	}
-	if err := s.ns.Delete(norm); err != nil {
+	entry := EditEntry{Op: OpDelete, Time: s.stamp(), Path: norm}
+	removed, err := s.applyDelete(entry)
+	if err != nil {
 		writeNamespaceError(w, err)
 		return
 	}
-	delete(s.up.byPath, norm)
+	if !s.record(w, &entry) {
+		return
+	}
 
-	removed := s.blocks.RemoveFile(norm)
 	if s.Deletes != nil {
 		// Un solo aviso por DataNode con todos sus bloques del archivo.
 		perNode := make(map[string][]string)

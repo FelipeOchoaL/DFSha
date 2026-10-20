@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +23,8 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3, CommitWait: 3 * time.Second}
+	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3,
+		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -28,17 +32,21 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 
 func TestLoadConfigDesdeEntorno(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"NODE_ID":            " namenode-active ",
-		"NAMENODE_ROLE":      "ACTIVE",
-		"REST_PORT":          "9090",
-		"GRPC_PORT":          "9000",
-		"REPLICATION_FACTOR": "2",
-		"COMMIT_WAIT_MS":     "250",
+		"NODE_ID":               " namenode-active ",
+		"NAMENODE_ROLE":         "ACTIVE",
+		"REST_PORT":             "9090",
+		"GRPC_PORT":             "9000",
+		"REPLICATION_FACTOR":    "2",
+		"COMMIT_WAIT_MS":        "250",
+		"META_DIR":              "/var/dfsha/meta",
+		"SNAPSHOT_EVERY":        "10",
+		"SNAPSHOT_INTERVAL_SEC": "60",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2, CommitWait: 250 * time.Millisecond}
+	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2,
+		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -52,6 +60,9 @@ func TestLoadConfigInvalida(t *testing.T) {
 		"puertos iguales":          {"REST_PORT": "8080", "GRPC_PORT": "8080"},
 		"réplicas no numéricas":    {"REPLICATION_FACTOR": "tres"},
 		"réplicas cero":            {"REPLICATION_FACTOR": "0"},
+		"snapshot negativo":        {"SNAPSHOT_EVERY": "-1"},
+		"intervalo negativo":       {"SNAPSHOT_INTERVAL_SEC": "-5"},
+		"intervalo no numerico":    {"SNAPSHOT_INTERVAL_SEC": "x"},
 		"espera negativa":          {"COMMIT_WAIT_MS": "-1"},
 		"espera no numerica":       {"COMMIT_WAIT_MS": "x"},
 		"rol desconocido":          {"NAMENODE_ROLE": "primary"},
@@ -78,12 +89,15 @@ func TestServeLevantaRESTyGRPCYCierraLimpio(t *testing.T) {
 	cfg := config{NodeID: "nn-test", Role: roleActive, ReplicationFactor: 3}
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr, grpcAddr := restLn.Addr().String(), grpcLn.Addr().String()
-	handler, grpcServer := newServers(cfg)
+	rest, grpcServer, err := newServers(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- serve(ctx, cfg, restLn, grpcLn, handler, grpcServer) }()
+	go func() { result <- serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer) }()
 
 	// REST: mkdir y ls funcionan.
 	resp, err := http.Post("http://"+restAddr+"/fs/mkdir", "application/json", strings.NewReader(`{"path":"/user/ana","parents":true}`))
@@ -149,10 +163,13 @@ func TestServeFallaSiUnServidorFalla(t *testing.T) {
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr := restLn.Addr().String()
 	grpcLn.Close() // gRPC no podrá aceptar conexiones
-	handler, grpcServer := newServers(cfg)
+	rest, grpcServer, err := newServers(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result := make(chan error, 1)
-	go func() { result <- serve(context.Background(), cfg, restLn, grpcLn, handler, grpcServer) }()
+	go func() { result <- serve(context.Background(), cfg, restLn, grpcLn, rest.Handler(), grpcServer) }()
 
 	select {
 	case err := <-result:
@@ -179,5 +196,123 @@ func TestRunFallaSiElPuertoEstaOcupado(t *testing.T) {
 	err = run(context.Background(), config{NodeID: "nn", Role: roleActive, RESTPort: port, GRPCPort: port + 1, ReplicationFactor: 3})
 	if err == nil || !strings.Contains(err.Error(), "REST") {
 		t.Errorf("run devolvió %v; quería un error de REST", err)
+	}
+}
+
+// freePort devuelve un puerto TCP libre (hay una pequeña ventana hasta que se usa).
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// startNameNode arranca run() en segundo plano y espera a que atienda REST.
+// Devuelve la URL base y una función que lo apaga y devuelve el resultado de run.
+func startNameNode(t *testing.T, cfg config) (string, func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- run(ctx, cfg) }()
+	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.RESTPort)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if resp, err := http.Get(base + "/fs/ls"); err == nil {
+			resp.Body.Close()
+			break
+		}
+		select {
+		case err := <-result:
+			cancel()
+			t.Fatalf("run terminó antes de tiempo: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("el NameNode no arrancó")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return base, func() error {
+		cancel()
+		select {
+		case err := <-result:
+			return err
+		case <-time.After(10 * time.Second):
+			t.Fatal("run no terminó al cancelar")
+			return nil
+		}
+	}
+}
+
+// Un reinicio completo del proceso conserva el namespace gracias al edit log y
+// al snapshot final que se guarda al apagar.
+func TestMetadatosSobrevivenAUnReinicio(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config{
+		NodeID: "nn", Role: roleActive, ReplicationFactor: 3,
+		RESTPort: freePort(t), GRPCPort: freePort(t),
+		MetaDir: dir, SnapshotEvery: 1000,
+	}
+
+	base, stop := startNameNode(t, cfg)
+	for _, body := range []string{`{"path":"/user/ana/docs","parents":true}`, `{"path":"/tmp"}`} {
+		resp, err := http.Post(base+"/fs/mkdir", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("mkdir %s: HTTP %d", body, resp.StatusCode)
+		}
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("run devolvió %v", err)
+	}
+	// Al apagar se guardó un snapshot y el log quedó vacío.
+	if _, err := os.Stat(filepath.Join(dir, "snapshot.json")); err != nil {
+		t.Errorf("debía existir el snapshot final: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "edits.log")); err != nil || info.Size() != 0 {
+		t.Errorf("el edit log debía quedar vacío: %v", err)
+	}
+
+	// Segundo arranque, mismo directorio y puertos nuevos.
+	cfg.RESTPort, cfg.GRPCPort = freePort(t), freePort(t)
+	base, stop = startNameNode(t, cfg)
+	resp, err := http.Get(base + "/fs/ls?path=/user/ana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"name":"docs"`) {
+		t.Errorf("tras reiniciar: HTTP %d, %s", resp.StatusCode, body)
+	}
+	if err := stop(); err != nil {
+		t.Errorf("run devolvió %v", err)
+	}
+}
+
+// Metadatos corruptos: el NameNode no arranca ni abre puertos.
+func TestNoArrancaConMetadatosCorruptos(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte("{no es json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{
+		NodeID: "nn", Role: roleActive, ReplicationFactor: 3,
+		RESTPort: freePort(t), GRPCPort: freePort(t), MetaDir: dir,
+	}
+	err := run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "recuperar los metadatos") {
+		t.Errorf("run devolvió %v; quería un error de metadatos", err)
+	}
+	if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.RESTPort), 300*time.Millisecond); err == nil {
+		c.Close()
+		t.Error("no debía abrirse el puerto REST")
 	}
 }

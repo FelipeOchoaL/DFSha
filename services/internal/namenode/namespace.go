@@ -98,7 +98,7 @@ func NewNamespace() *Namespace {
 	ns.root = &inode{
 		isDir:    true,
 		owner:    "root",
-		modTime:  ns.now(),
+		modTime:  time.Unix(0, 0).UTC(), // fija: la raíz no cambia entre reinicios sin hijos
 		children: make(map[string]*inode),
 	}
 	return ns
@@ -397,4 +397,126 @@ func (ns *Namespace) addChild(parent, child *inode) {
 func (ns *Namespace) removeChild(parent *inode, name string) {
 	delete(parent.children, name)
 	parent.modTime = ns.now()
+}
+
+// --- soporte para persistencia (edit log y snapshot, US-70) ---
+
+// CanCreateFile informa si CreateFile(p, ...) tendría éxito, sin crear nada:
+// devuelve los mismos errores. Permite validar antes de hacer otros pasos
+// (como elegir DataNodes) sin dejar cambios a medias.
+func (ns *Namespace) CanCreateFile(p string) error {
+	norm, err := NormalizePath(p)
+	if err != nil {
+		return err
+	}
+	if norm == "/" {
+		return fmt.Errorf("%w: no se puede crear un archivo en la raíz: %s", ErrInvalidPath, p)
+	}
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+
+	parent, name, err := ns.parentOf(norm)
+	if err != nil {
+		return err
+	}
+	if _, exists := parent.children[name]; exists {
+		return fmt.Errorf("%w: %s", ErrAlreadyExists, norm)
+	}
+	return nil
+}
+
+// setNow fija la hora que usarán las siguientes mutaciones. Se usa para que una
+// operación tenga exactamente la misma fecha cuando se ejecuta en vivo y cuando
+// se reproduce desde el edit log. Las mutaciones se serializan fuera de aquí.
+func (ns *Namespace) setNow(t time.Time) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.now = func() time.Time { return t }
+}
+
+// snapInode es la forma serializable de un inodo en el snapshot.
+type snapInode struct {
+	Name     string       `json:"name"`
+	Dir      bool         `json:"dir,omitempty"`
+	Owner    string       `json:"owner"`
+	ModTime  time.Time    `json:"modTime"`
+	Size     int64        `json:"size,omitempty"`
+	State    FileState    `json:"state,omitempty"`
+	Children []*snapInode `json:"children,omitempty"`
+}
+
+// export devuelve una copia serializable de todo el árbol (hijos ordenados por nombre).
+func (ns *Namespace) export() *snapInode {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	return exportInode(ns.root)
+}
+
+func exportInode(n *inode) *snapInode {
+	s := &snapInode{
+		Name:    n.name,
+		Dir:     n.isDir,
+		Owner:   n.owner,
+		ModTime: n.modTime,
+		Size:    n.size,
+		State:   n.state,
+	}
+	if n.isDir {
+		names := make([]string, 0, len(n.children))
+		for name := range n.children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			s.Children = append(s.Children, exportInode(n.children[name]))
+		}
+	}
+	return s
+}
+
+// restore reemplaza todo el árbol por el del snapshot.
+func (ns *Namespace) restore(root *snapInode) error {
+	if root == nil || !root.Dir {
+		return fmt.Errorf("snapshot inválido: la raíz debe ser un directorio")
+	}
+	rebuilt, err := restoreInode(root, "/")
+	if err != nil {
+		return err
+	}
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.root = rebuilt
+	return nil
+}
+
+func restoreInode(s *snapInode, where string) (*inode, error) {
+	n := &inode{
+		name:    s.Name,
+		isDir:   s.Dir,
+		owner:   s.Owner,
+		modTime: s.ModTime,
+		size:    s.Size,
+		state:   s.State,
+	}
+	if !s.Dir {
+		if len(s.Children) > 0 {
+			return nil, fmt.Errorf("snapshot inválido: el archivo %s tiene hijos", where)
+		}
+		return n, nil
+	}
+	n.children = make(map[string]*inode, len(s.Children))
+	for _, c := range s.Children {
+		if c.Name == "" || strings.Contains(c.Name, "/") {
+			return nil, fmt.Errorf("snapshot inválido: nombre %q en %s", c.Name, where)
+		}
+		if _, dup := n.children[c.Name]; dup {
+			return nil, fmt.Errorf("snapshot inválido: %q repetido en %s", c.Name, where)
+		}
+		child, err := restoreInode(c, path.Join(where, c.Name))
+		if err != nil {
+			return nil, err
+		}
+		n.children[c.Name] = child
+	}
+	return n, nil
 }

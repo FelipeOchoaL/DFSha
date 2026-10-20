@@ -311,3 +311,45 @@ func (m *BlockMap) ReplicasWithChecksum(blockID, checksum string) []string {
 	sort.Strings(nodes)
 	return nodes
 }
+
+// --- soporte para persistencia (snapshot, US-70) ---
+
+// snapBlock es la forma serializable de un bloque. Las réplicas NO se guardan:
+// se reconstruyen con los block reports de los DataNodes.
+type snapBlock struct {
+	Size     int64  `json:"size"`
+	Checksum string `json:"checksum,omitempty"`
+}
+
+// export devuelve copias de la lista de bloques por archivo y de los datos de
+// cada bloque, sin las ubicaciones de las réplicas.
+func (m *BlockMap) export() (map[string][]string, map[string]snapBlock) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	files := make(map[string][]string, len(m.files))
+	for path, ids := range m.files {
+		files[path] = append([]string(nil), ids...)
+	}
+	blocks := make(map[string]snapBlock, len(m.blocks))
+	for id, rec := range m.blocks {
+		blocks[id] = snapBlock{Size: rec.size, Checksum: rec.checksum}
+	}
+	return files, blocks
+}
+
+// restore reemplaza todo el contenido del mapa. Los bloques quedan sin réplicas.
+func (m *BlockMap) restore(files map[string][]string, blocks map[string]snapBlock) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.files = make(map[string][]string, len(files))
+	for path, ids := range files {
+		m.files[path] = append([]string(nil), ids...)
+	}
+	m.blocks = make(map[string]*blockRecord, len(blocks))
+	for id, b := range blocks {
+		m.blocks[id] = &blockRecord{size: b.Size, checksum: b.Checksum, replicas: make(map[string]string)}
+	}
+	m.byNode = make(map[string]map[string]struct{})
+}

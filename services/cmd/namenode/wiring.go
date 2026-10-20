@@ -2,7 +2,7 @@ package main
 
 import (
 	"errors"
-	"net/http"
+	"fmt"
 
 	"dfsha/services/internal/namenode"
 
@@ -37,8 +37,10 @@ func (noDataNodes) LiveNode(string) (namenode.PipelineNode, bool) {
 	return namenode.PipelineNode{}, false
 }
 
-// newServers arma el handler REST y el servidor gRPC del NameNode.
-func newServers(cfg config) (http.Handler, *grpc.Server) {
+// newServers arma el servidor REST y el servidor gRPC del NameNode. Si hay un
+// directorio de metadatos configurado recupera el estado guardado (snapshot +
+// edit log); si está corrupto devuelve error y el NameNode no arranca.
+func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
 	ns := namenode.NewNamespace()
 	blocks := namenode.NewBlockMap()
 	registry := noDataNodes{}
@@ -47,11 +49,16 @@ func newServers(cfg config) (http.Handler, *grpc.Server) {
 	rest.Nodes = registry
 	rest.ReplicationFactor = cfg.ReplicationFactor
 	rest.CommitWait = cfg.CommitWait
+	if cfg.MetaDir != "" {
+		if err := rest.EnablePersistence(cfg.MetaDir, cfg.SnapshotEvery); err != nil {
+			return nil, nil, fmt.Errorf("recuperar los metadatos de %s: %w", cfg.MetaDir, err)
+		}
+	}
 
 	grpcServer := grpc.NewServer()
 	registerGRPC(grpcServer, ns, blocks)
 
-	return rest.Handler(), grpcServer
+	return rest, grpcServer, nil
 }
 
 // registerGRPC registra los servicios gRPC del NameNode. Por ahora no hay

@@ -12,12 +12,15 @@ import (
 // configuración compartida esté en main, basta con reemplazar loadConfig por
 // common.LoadConfig sin tocar el resto del arranque.
 const (
-	defaultNodeID            = "namenode-1"
-	defaultRole              = roleActive
-	defaultRESTPort          = 8080
-	defaultGRPCPort          = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
-	defaultReplicationFactor = 3
-	defaultCommitWaitMS      = 3000 // espera maxima de commit por las replicas (US-52)
+	defaultNodeID              = "namenode-1"
+	defaultRole                = roleActive
+	defaultRESTPort            = 8080
+	defaultGRPCPort            = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
+	defaultReplicationFactor   = 3
+	defaultCommitWaitMS        = 3000          // espera maxima de commit por las replicas (US-52)
+	defaultMetaDir             = "./data/meta" // edit log y snapshot (US-70); el directorio data/ no se sube a git
+	defaultSnapshotEvery       = 1000          // operaciones entre snapshots; 0 = solo por tiempo
+	defaultSnapshotIntervalSec = 300           // segundos entre snapshots periodicos; 0 = desactivado
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -35,6 +38,9 @@ type config struct {
 	GRPCPort          int           // GRPC_PORT
 	ReplicationFactor int           // REPLICATION_FACTOR
 	CommitWait        time.Duration // COMMIT_WAIT_MS: milisegundos que commit espera las replicas
+	MetaDir           string        // META_DIR: donde se guardan el edit log y el snapshot; vacio = sin persistencia
+	SnapshotEvery     int           // SNAPSHOT_EVERY: operaciones entre snapshots
+	SnapshotInterval  time.Duration // SNAPSHOT_INTERVAL_SEC: tiempo entre snapshots periodicos
 }
 
 // loadConfig lee la configuración usando getenv (os.Getenv en producción).
@@ -67,6 +73,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("COMMIT_WAIT_MS no puede ser negativo")
 	}
 	cfg.CommitWait = time.Duration(waitMS) * time.Millisecond
+
+	if cfg.MetaDir, err = envDir(getenv, "META_DIR", defaultMetaDir); err != nil {
+		return config{}, err
+	}
+	if cfg.SnapshotEvery, err = envNonNegative(getenv, "SNAPSHOT_EVERY", defaultSnapshotEvery); err != nil {
+		return config{}, err
+	}
+	intervalSec, err := envNonNegative(getenv, "SNAPSHOT_INTERVAL_SEC", defaultSnapshotIntervalSec)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.SnapshotInterval = time.Duration(intervalSec) * time.Second
 
 	switch cfg.Role {
 	case roleActive:
@@ -104,6 +122,26 @@ func envPort(getenv func(string) string, key string, fallback int) (int, error) 
 	}
 	if v <= 0 || v > 65535 {
 		return 0, fmt.Errorf("%s debe estar entre 1 y 65535", key)
+	}
+	return v, nil
+}
+
+// envDir lee un directorio; "-" desactiva la persistencia (devuelve "").
+func envDir(getenv func(string) string, key, fallback string) (string, error) {
+	v := envString(getenv, key, fallback)
+	if v == "-" {
+		return "", nil
+	}
+	return v, nil
+}
+
+func envNonNegative(getenv func(string) string, key string, fallback int) (int, error) {
+	v, err := envInt(getenv, key, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("%s no puede ser negativo", key)
 	}
 	return v, nil
 }
