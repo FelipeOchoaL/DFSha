@@ -374,6 +374,7 @@ Devuelve, en orden, los bloques de un archivo y los DataNodes **vivos** que tien
 
 - Un archivo vacío devuelve `size: 0` y `blocks: []`.
 - `locations` puede venir vacío si ningún DataNode vivo tiene el bloque; el cliente debe tratarlo como error de ese bloque.
+- `locations` solo incluye DataNodes **vivos** cuya copia tiene el checksum confirmado del bloque. El orden rota por bloque (el bloque `i` empieza por la réplica `i mod n`) para que las descargas en paralelo se repartan entre los nodos; el cliente debe probarlas en el orden recibido.
 
 **Errores:** `400 INVALID_PATH`, `401`, `403`, `404 NOT_FOUND`, `409 FILE_UNDER_CONSTRUCTION`, `503 NAMENODE_STANDBY`. Si `path` es un directorio se responde `400 IS_A_DIRECTORY`.
 

@@ -274,3 +274,21 @@ func TestRemoveBlock(t *testing.T) {
 		t.Error("el archivo no debía conservar bloques")
 	}
 }
+
+func TestReplicasWithChecksum(t *testing.T) {
+	m := NewBlockMap()
+	must(t, m.AddFileBlock("/a", "b0", 1))
+	must(t, m.AddReplica("b0", "dn3", "abc"))
+	must(t, m.AddReplica("b0", "dn1", "abc"))
+	must(t, m.AddReplica("b0", "dn2", "otro")) // antes del commit se acepta
+
+	if got := m.ReplicasWithChecksum("b0", "abc"); !reflect.DeepEqual(got, []string{"dn1", "dn3"}) {
+		t.Errorf("ReplicasWithChecksum = %v; quería [dn1 dn3]", got)
+	}
+	if got := m.ReplicasWithChecksum("b0", "nada"); len(got) != 0 {
+		t.Errorf("sin coincidencias debía dar vacío, dio %v", got)
+	}
+	if got := m.ReplicasWithChecksum("nope", "abc"); got != nil {
+		t.Errorf("bloque desconocido debía dar nil, dio %v", got)
+	}
+}

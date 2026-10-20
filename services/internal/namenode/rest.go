@@ -3,7 +3,8 @@
 // El contrato exacto está en documentation/api-rest.md.
 //
 // Estado actual: /fs/ls, /fs/mkdir, /fs/rmdir (US-25) y /files/allocate,
-// /files/commit, /files/finalize (US-26, ver writes.go).
+// /files/commit, /files/finalize (US-26, ver writes.go) y /files/locations
+// (US-27, ver reads.go).
 package namenode
 
 import (
@@ -51,6 +52,11 @@ type RESTServer struct {
 	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
 	ReplicationFactor int
 
+	// Nodes informa qué DataNodes están vivos y cuál es su dirección. Lo usa
+	// /files/locations; debe asignarse antes de servir peticiones (lo implementa el
+	// registro de DataNodes, US-22).
+	Nodes NodeDirectory
+
 	// Authenticate identifica al usuario de una petición. Si devuelve error la
 	// petición se rechaza con 401 UNAUTHORIZED.
 	//
@@ -83,6 +89,7 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("/files/allocate", s.route(http.MethodPost, s.handleAllocate))
 	mux.HandleFunc("/files/commit", s.route(http.MethodPost, s.handleCommit))
 	mux.HandleFunc("/files/finalize", s.route(http.MethodPost, s.handleFinalize))
+	mux.HandleFunc("/files/locations", s.route(http.MethodGet, s.handleLocations))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
 	})

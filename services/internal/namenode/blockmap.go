@@ -290,3 +290,24 @@ func (m *BlockMap) RemoveBlock(path, blockID string) {
 	}
 	delete(m.blocks, blockID)
 }
+
+// ReplicasWithChecksum devuelve, ordenados, los ids de los DataNodes cuya copia
+// del bloque tiene el checksum indicado. Excluye copias con otro checksum, que
+// no deben servirse a los clientes.
+func (m *BlockMap) ReplicasWithChecksum(blockID, checksum string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rec, ok := m.blocks[blockID]
+	if !ok {
+		return nil
+	}
+	nodes := make([]string, 0, len(rec.replicas))
+	for nodeID, c := range rec.replicas {
+		if c == checksum {
+			nodes = append(nodes, nodeID)
+		}
+	}
+	sort.Strings(nodes)
+	return nodes
+}
