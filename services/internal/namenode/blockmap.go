@@ -254,3 +254,39 @@ func infoOf(id string, rec *blockRecord) BlockInfo {
 	sort.Strings(replicas)
 	return BlockInfo{ID: id, Size: rec.size, Checksum: rec.checksum, Replicas: replicas}
 }
+
+// RemoveBlock quita un solo bloque de un archivo y del mapa (por ejemplo un
+// bloque asignado que el cliente reintenta con otro pipeline). Las copias que
+// hubiera en los DataNodes quedan huérfanas y se limpian con el block report.
+// No falla si el bloque no existe.
+func (m *BlockMap) RemoveBlock(path, blockID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ids, ok := m.files[path]; ok {
+		kept := ids[:0:0]
+		for _, id := range ids {
+			if id != blockID {
+				kept = append(kept, id)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.files, path)
+		} else {
+			m.files[path] = kept
+		}
+	}
+	rec, ok := m.blocks[blockID]
+	if !ok {
+		return
+	}
+	for nodeID := range rec.replicas {
+		if set, ok := m.byNode[nodeID]; ok {
+			delete(set, blockID)
+			if len(set) == 0 {
+				delete(m.byNode, nodeID)
+			}
+		}
+	}
+	delete(m.blocks, blockID)
+}

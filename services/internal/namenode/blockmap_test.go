@@ -249,3 +249,28 @@ func TestBlockMapConcurrente(t *testing.T) {
 		t.Errorf("al final no debían quedar bloques: %v", got)
 	}
 }
+
+func TestRemoveBlock(t *testing.T) {
+	m := NewBlockMap()
+	must(t, m.AddFileBlock("/a", "b0", 10))
+	must(t, m.AddFileBlock("/a", "b1", 10))
+	must(t, m.AddReplica("b1", "dn1", "x"))
+
+	m.RemoveBlock("/a", "b1")
+	m.RemoveBlock("/a", "b1") // no falla si ya no existe
+	m.RemoveBlock("/nope", "zzz")
+	if got := m.FileBlocks("/a"); !reflect.DeepEqual(got, []string{"b0"}) {
+		t.Errorf("FileBlocks = %v; quería [b0]", got)
+	}
+	if _, ok := m.Block("b1"); ok {
+		t.Error("b1 debía desaparecer")
+	}
+	if got := m.RemoveNode("dn1"); len(got) != 0 {
+		t.Errorf("el índice inverso debía quedar limpio, dio %v", got)
+	}
+	// Quitar el último bloque deja el archivo sin bloques.
+	m.RemoveBlock("/a", "b0")
+	if m.FileBlocks("/a") != nil {
+		t.Error("el archivo no debía conservar bloques")
+	}
+}

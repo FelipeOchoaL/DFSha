@@ -2,7 +2,8 @@
 // /files/allocate, /files/commit, /files/finalize, /files/locations.
 // El contrato exacto está en documentation/api-rest.md.
 //
-// Estado actual (US-25): /fs/ls, /fs/mkdir y /fs/rmdir.
+// Estado actual: /fs/ls, /fs/mkdir, /fs/rmdir (US-25) y /files/allocate,
+// /files/commit, /files/finalize (US-26, ver writes.go).
 package namenode
 
 import (
@@ -29,6 +30,11 @@ const (
 	codeDirNotEmpty      = "DIRECTORY_NOT_EMPTY"
 	codeMethodNotAllowed = "METHOD_NOT_ALLOWED"
 	codeInternal         = "INTERNAL_ERROR"
+	codeForbidden        = "FORBIDDEN"
+	codeFileBeingWritten = "FILE_BEING_WRITTEN"
+	codeBlockOutOfOrder  = "BLOCK_OUT_OF_ORDER"
+	codeIncompleteFile   = "INCOMPLETE_FILE"
+	codeInsufficientDN   = "INSUFFICIENT_DATANODES"
 )
 
 // anonymousUser es el usuario que se asume mientras no exista autenticación.
@@ -36,7 +42,14 @@ const anonymousUser = "anonymous"
 
 // RESTServer expone el namespace por HTTP/JSON.
 type RESTServer struct {
-	ns *Namespace
+	ns     *Namespace
+	blocks *BlockMap
+	placer BlockPlacer
+	up     uploadTable // subidas en curso (ver writes.go)
+
+	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
+	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
+	ReplicationFactor int
 
 	// Authenticate identifica al usuario de una petición. Si devuelve error la
 	// petición se rechaza con 401 UNAUTHORIZED.
@@ -48,11 +61,16 @@ type RESTServer struct {
 	Authenticate func(r *http.Request) (user string, err error)
 }
 
-// NewRESTServer crea el servidor REST sobre un namespace.
-func NewRESTServer(ns *Namespace) *RESTServer {
+// NewRESTServer crea el servidor REST. blocks es el mapa de bloques y placer
+// decide en qué DataNodes va cada bloque (lo implementa placement.go, US-24).
+func NewRESTServer(ns *Namespace, blocks *BlockMap, placer BlockPlacer) *RESTServer {
 	return &RESTServer{
-		ns:           ns,
-		Authenticate: func(*http.Request) (string, error) { return anonymousUser, nil },
+		ns:                ns,
+		blocks:            blocks,
+		placer:            placer,
+		up:                newUploadTable(),
+		ReplicationFactor: 3,
+		Authenticate:      func(*http.Request) (string, error) { return anonymousUser, nil },
 	}
 }
 
@@ -62,6 +80,9 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("/fs/ls", s.route(http.MethodGet, s.handleLs))
 	mux.HandleFunc("/fs/mkdir", s.route(http.MethodPost, s.handleMkdir))
 	mux.HandleFunc("/fs/rmdir", s.route(http.MethodDelete, s.handleRmdir))
+	mux.HandleFunc("/files/allocate", s.route(http.MethodPost, s.handleAllocate))
+	mux.HandleFunc("/files/commit", s.route(http.MethodPost, s.handleCommit))
+	mux.HandleFunc("/files/finalize", s.route(http.MethodPost, s.handleFinalize))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
 	})

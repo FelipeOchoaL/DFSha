@@ -1,0 +1,436 @@
+// Escritura de archivos (write-once): allocate, commit y finalize.
+//
+// Flujo por archivo (ver documentation/diagrams/01-put-escritura.puml):
+//
+// para cada bloque i: allocate -> WriteBlock (gRPC, no pasa por aquí) -> commit
+// finalize
+//
+// El estado de cada subida en curso vive en uploadTable (en memoria). Su
+// persistencia y replicación al standby llegan con el edit log (US-70/71).
+package namenode
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+)
+
+// PipelineNode es un DataNode del pipeline de un bloque, tal como lo ve el
+// cliente (host y port son los que el DataNode anunció con ADVERTISE_ADDR).
+type PipelineNode struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port uint32 `json:"port"`
+	Rack string `json:"rack"`
+}
+
+// BlockPlacer decide en qué DataNodes va cada bloque. Lo implementa la
+// colocación del NameNode (placement.go, US-24 y US-50); aquí solo se define lo
+// que allocate necesita, para que ambas partes se integren sin acoplarse.
+type BlockPlacer interface {
+	// Place devuelve exactamente replicas DataNodes vivos y distintos, en el
+	// orden del pipeline (el cliente escribe en el primero). path y blockIndex
+	// permiten repartir los bloques consecutivos de un archivo entre nodos
+	// distintos. Si no hay suficientes DataNodes vivos devuelve un error.
+	Place(path string, blockIndex, replicas int) ([]PipelineNode, error)
+}
+
+// committedBlock es un bloque ya confirmado por el cliente.
+type committedBlock struct {
+	id       string
+	size     int64
+	checksum string
+}
+
+// pendingBlock es el bloque asignado (allocate) que aún espera su commit.
+type pendingBlock struct {
+	id    string
+	index int
+	size  int64
+}
+
+// upload es el estado de una subida en curso de un archivo.
+type upload struct {
+	id            string
+	owner         string
+	committed     []committedBlock // bloques 0..n-1 confirmados, en orden
+	committedSize int64            // suma de los tamaños confirmados (= próximo offset)
+	pending       *pendingBlock    // bloque n asignado y sin confirmar, si hay
+	attempts      map[int]int      // blockIndex -> intentos de allocate (para ids únicos)
+}
+
+// uploadTable guarda las subidas en curso por ruta. Su mutex se toma durante
+// todo allocate/commit/finalize, así que esas operaciones son atómicas entre
+// sí. Orden de locks: uploadTable.mu -> Namespace.mu -> BlockMap.mu.
+type uploadTable struct {
+	mu     sync.Mutex
+	byPath map[string]*upload
+}
+
+func newUploadTable() uploadTable {
+	return uploadTable{byPath: make(map[string]*upload)}
+}
+
+// newUploadID genera un identificador aleatorio de subida (UUID v4).
+func newUploadID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
+}
+
+// blockID arma el id de un bloque: blk_<8 primeros del uploadId>_<índice>. Los
+// reintentos del mismo índice añaden _r<n> para que un bloque a medias del
+// intento anterior nunca se confunda con el nuevo.
+func (u *upload) blockID(index int) string {
+	short := u.id[:8]
+	attempt := u.attempts[index]
+	u.attempts[index]++
+	if attempt == 0 {
+		return fmt.Sprintf("blk_%s_%d", short, index)
+	}
+	return fmt.Sprintf("blk_%s_%d_r%d", short, index, attempt)
+}
+
+// lookupUpload devuelve la subida de path validando uploadId y dueño. Si falla
+// ya respondió al cliente y devuelve false. Debe llamarse con up.mu tomado.
+func (s *RESTServer) lookupUpload(w http.ResponseWriter, path, uploadID, user string) (*upload, bool) {
+	u, ok := s.up.byPath[path]
+	if !ok {
+		// Sin subida registrada: o el archivo no existe o ya está completo.
+		e, err := s.ns.Stat(path)
+		switch {
+		case err != nil:
+			writeNamespaceError(w, err)
+		case e.Type == TypeDir:
+			writeError(w, http.StatusBadRequest, codeIsADirectory, "es un directorio: "+path)
+		case e.State == StateComplete:
+			writeError(w, http.StatusConflict, codeAlreadyExists, "el archivo ya está completo: "+path)
+		default:
+			// UNDER_CONSTRUCTION sin subida: quedó de una ejecución anterior del NameNode.
+			writeError(w, http.StatusConflict, codeFileBeingWritten,
+				"el archivo está en construcción y no tiene una subida activa; elimínelo con rm y vuelva a intentar: "+path)
+		}
+		return nil, false
+	}
+	if u.id != uploadID {
+		writeError(w, http.StatusConflict, codeFileBeingWritten,
+			"otra subida está escribiendo este archivo: "+path)
+		return nil, false
+	}
+	if u.owner != user {
+		writeError(w, http.StatusForbidden, codeForbidden, "la subida pertenece a otro usuario: "+path)
+		return nil, false
+	}
+	return u, true
+}
+
+// --- POST /files/allocate ---
+
+type allocateRequest struct {
+	Path       string `json:"path"`
+	BlockIndex int    `json:"blockIndex"`
+	Size       int64  `json:"size"`
+	UploadID   string `json:"uploadId"`
+}
+
+type allocateResponse struct {
+	UploadID   string         `json:"uploadId"`
+	BlockID    string         `json:"blockId"`
+	BlockIndex int            `json:"blockIndex"`
+	Offset     int64          `json:"offset"`
+	Size       int64          `json:"size"`
+	Pipeline   []PipelineNode `json:"pipeline"`
+}
+
+// handleAllocate asigna un bloque. El primero (blockIndex 0, sin uploadId) crea
+// el archivo en UNDER_CONSTRUCTION y abre la subida. Repetir allocate para el
+// bloque pendiente lo descarta y asigna uno nuevo (reintento del cliente).
+func (s *RESTServer) handleAllocate(w http.ResponseWriter, r *http.Request, user string) {
+	var req allocateRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	switch {
+	case req.Path == "":
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el campo obligatorio: path")
+		return
+	case req.BlockIndex < 0:
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "blockIndex no puede ser negativo")
+		return
+	case req.Size < 0 || (req.Size == 0 && (req.BlockIndex != 0 || req.UploadID != "")):
+		writeError(w, http.StatusBadRequest, codeInvalidRequest,
+			"size debe ser mayor que 0 (size 0 solo se admite en el primer allocate de un archivo vacío)")
+		return
+	case req.UploadID == "" && req.BlockIndex != 0:
+		writeError(w, http.StatusBadRequest, codeInvalidRequest,
+			"uploadId es obligatorio salvo en el primer bloque (blockIndex 0)")
+		return
+	}
+	norm, err := NormalizePath(req.Path)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	var u *upload
+	isNew := req.UploadID == ""
+	if isNew {
+		u, err = s.startUpload(norm, user)
+		if err != nil {
+			s.writeStartUploadError(w, norm, err)
+			return
+		}
+	} else {
+		var ok bool
+		if u, ok = s.lookupUpload(w, norm, req.UploadID, user); !ok {
+			return
+		}
+		// Solo se puede pedir el siguiente bloque o repetir el pendiente.
+		if req.BlockIndex != len(u.committed) {
+			writeError(w, http.StatusConflict, codeBlockOutOfOrder, fmt.Sprintf(
+				"se esperaba el bloque %d y se pidió el %d", len(u.committed), req.BlockIndex))
+			return
+		}
+	}
+
+	// Archivo vacío: solo se abre la subida; no hay bloque que asignar. El cliente
+	// llama a finalize a continuación.
+	if req.Size == 0 {
+		writeJSON(w, http.StatusOK, allocateResponse{UploadID: u.id, Pipeline: []PipelineNode{}})
+		return
+	}
+
+	pipeline, err := s.placer.Place(norm, req.BlockIndex, s.ReplicationFactor)
+	if err != nil {
+		if isNew {
+			s.abortUpload(norm) // no dejar un archivo vacío por un allocate que falló
+		}
+		writeError(w, http.StatusServiceUnavailable, codeInsufficientDN,
+			"no hay suficientes DataNodes vivos: "+err.Error())
+		return
+	}
+
+	// Reintento: se descarta el bloque pendiente del intento anterior.
+	if u.pending != nil {
+		s.blocks.RemoveBlock(norm, u.pending.id)
+		u.pending = nil
+	}
+	blockID := u.blockID(req.BlockIndex)
+	if err := s.blocks.AddFileBlock(norm, blockID, req.Size); err != nil {
+		if isNew {
+			s.abortUpload(norm)
+		}
+		writeError(w, http.StatusInternalServerError, codeInternal, "error interno del servidor")
+		return
+	}
+	u.pending = &pendingBlock{id: blockID, index: req.BlockIndex, size: req.Size}
+
+	writeJSON(w, http.StatusOK, allocateResponse{
+		UploadID:   u.id,
+		BlockID:    blockID,
+		BlockIndex: req.BlockIndex,
+		Offset:     u.committedSize,
+		Size:       req.Size,
+		Pipeline:   pipeline,
+	})
+}
+
+// startUpload crea el archivo UNDER_CONSTRUCTION y abre su subida. Debe
+// llamarse con up.mu tomado.
+func (s *RESTServer) startUpload(path, user string) (*upload, error) {
+	id, err := newUploadID()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ns.CreateFile(path, user); err != nil {
+		return nil, err
+	}
+	u := &upload{id: id, owner: user, attempts: make(map[int]int)}
+	s.up.byPath[path] = u
+	return u, nil
+}
+
+// abortUpload deshace startUpload. Debe llamarse con up.mu tomado.
+func (s *RESTServer) abortUpload(path string) {
+	delete(s.up.byPath, path)
+	_ = s.ns.Delete(path)
+}
+
+// writeStartUploadError traduce el fallo de startUpload. Que el path ya exista
+// es 409 FILE_BEING_WRITTEN si es un archivo en construcción (otro put en
+// curso) y 409 ALREADY_EXISTS en cualquier otro caso.
+func (s *RESTServer) writeStartUploadError(w http.ResponseWriter, path string, err error) {
+	if errors.Is(err, ErrAlreadyExists) {
+		if e, serr := s.ns.Stat(path); serr == nil && e.Type == TypeFile && e.State == StateUnderConstruction {
+			writeError(w, http.StatusConflict, codeFileBeingWritten,
+				"otra subida está escribiendo este archivo: "+path)
+			return
+		}
+	}
+	writeNamespaceError(w, err)
+}
+
+// --- POST /files/commit ---
+
+type commitRequest struct {
+	Path           string `json:"path"`
+	UploadID       string `json:"uploadId"`
+	BlockID        string `json:"blockId"`
+	Size           int64  `json:"size"`
+	ChecksumSha256 string `json:"checksumSha256"`
+}
+
+type commitResponse struct {
+	BlockID  string `json:"blockId"`
+	Replicas int    `json:"replicas"`
+}
+
+// handleCommit confirma un bloque con su tamaño y checksum.
+//
+// En esta versión se acepta aunque el bloque tenga menos réplicas confirmadas
+// que el factor de réplica; la regla estricta 3 de 3 se añade en US-52.
+func (s *RESTServer) handleCommit(w http.ResponseWriter, r *http.Request, user string) {
+	var req commitRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	switch {
+	case req.Path == "" || req.UploadID == "" || req.BlockID == "":
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "faltan campos obligatorios: path, uploadId, blockId")
+		return
+	case req.Size <= 0:
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "size debe ser mayor que 0")
+		return
+	case !isSHA256Hex(req.ChecksumSha256):
+		writeError(w, http.StatusBadRequest, codeInvalidRequest,
+			"checksumSha256 debe ser un SHA-256 en hexadecimal minúscula (64 caracteres)")
+		return
+	}
+	norm, err := NormalizePath(req.Path)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	u, ok := s.lookupUpload(w, norm, req.UploadID, user)
+	if !ok {
+		return
+	}
+
+	if u.pending == nil || u.pending.id != req.BlockID {
+		// ¿Reintento de un commit que ya se aplicó (se perdió la respuesta)?
+		for _, c := range u.committed {
+			if c.id == req.BlockID && c.size == req.Size && c.checksum == req.ChecksumSha256 {
+				writeJSON(w, http.StatusOK, commitResponse{
+					BlockID:  c.id,
+					Replicas: s.blocks.CountReplicas(c.id, c.checksum),
+				})
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, codeNotFound, "bloque desconocido o no asignado: "+req.BlockID)
+		return
+	}
+	if req.Size != u.pending.size {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf(
+			"size (%d) no coincide con el tamaño asignado (%d)", req.Size, u.pending.size))
+		return
+	}
+
+	if err := s.blocks.CommitBlock(req.BlockID, req.Size, req.ChecksumSha256); err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, "error interno del servidor")
+		return
+	}
+	u.committed = append(u.committed, committedBlock{id: req.BlockID, size: req.Size, checksum: req.ChecksumSha256})
+	u.committedSize += req.Size
+	u.pending = nil
+
+	writeJSON(w, http.StatusOK, commitResponse{
+		BlockID:  req.BlockID,
+		Replicas: s.blocks.CountReplicas(req.BlockID, req.ChecksumSha256),
+	})
+}
+
+// --- POST /files/finalize ---
+
+type finalizeRequest struct {
+	Path     string `json:"path"`
+	UploadID string `json:"uploadId"`
+}
+
+type finalizeResponse struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	Blocks int    `json:"blocks"`
+	State  string `json:"state"`
+}
+
+// handleFinalize cierra el archivo: pasa a COMPLETE con su tamaño total. Un
+// archivo sin bloques (vacío) es válido.
+func (s *RESTServer) handleFinalize(w http.ResponseWriter, r *http.Request, user string) {
+	var req finalizeRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Path == "" || req.UploadID == "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "faltan campos obligatorios: path, uploadId")
+		return
+	}
+	norm, err := NormalizePath(req.Path)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	u, ok := s.lookupUpload(w, norm, req.UploadID, user)
+	if !ok {
+		return
+	}
+	if u.pending != nil {
+		writeError(w, http.StatusConflict, codeIncompleteFile, fmt.Sprintf(
+			"el bloque %d fue asignado pero no confirmado", u.pending.index))
+		return
+	}
+	if err := s.ns.CompleteFile(norm, u.committedSize); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	delete(s.up.byPath, norm)
+
+	writeJSON(w, http.StatusCreated, finalizeResponse{
+		Path:   norm,
+		Size:   u.committedSize,
+		Blocks: len(u.committed),
+		State:  string(StateComplete),
+	})
+}
+
+// isSHA256Hex indica si s es un SHA-256 en hexadecimal minúscula.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}

@@ -248,7 +248,7 @@ Reglas:
 ```
 
 - `blockIndex`: índice del bloque, desde `0`.
-- `size`: tamaño en bytes del bloque (el último puede ser menor). Debe ser mayor que `0`.
+- `size`: tamaño en bytes del bloque (el último puede ser menor). Debe ser mayor que `0`, con una excepción: un archivo **vacío** se sube con un único `allocate` de `blockIndex: 0`, `size: 0` y `uploadId` vacío, que crea el archivo y devuelve un `uploadId` sin `blockId` (`""`) ni `pipeline` (`[]`); después se llama a `finalize`.
 - `uploadId`: vacío u omitido **solo** en el primer `allocate` (`blockIndex = 0`) de una subida; obligatorio después.
 
 **Response 200**

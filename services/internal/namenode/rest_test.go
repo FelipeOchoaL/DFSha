@@ -48,7 +48,7 @@ func wantError(t *testing.T, w *httptest.ResponseRecorder, status int, code stri
 func newTestHandler(t *testing.T) (http.Handler, *Namespace) {
 	t.Helper()
 	ns := NewNamespace()
-	return NewRESTServer(ns).Handler(), ns
+	return NewRESTServer(ns, NewBlockMap(), newFakePlacer(4)).Handler(), ns
 }
 
 func TestMkdirREST(t *testing.T) {
@@ -204,7 +204,7 @@ func TestMetodosYRutasDesconocidas(t *testing.T) {
 
 func TestAutenticacionRechazada(t *testing.T) {
 	ns := NewNamespace()
-	s := NewRESTServer(ns)
+	s := NewRESTServer(ns, NewBlockMap(), newFakePlacer(4))
 	s.Authenticate = func(*http.Request) (string, error) { return "", errors.New("token inválido") }
 	h := s.Handler()
 
@@ -215,7 +215,7 @@ func TestAutenticacionRechazada(t *testing.T) {
 
 func TestMkdirUsaElUsuarioAutenticado(t *testing.T) {
 	ns := NewNamespace()
-	s := NewRESTServer(ns)
+	s := NewRESTServer(ns, NewBlockMap(), newFakePlacer(4))
 	s.Authenticate = func(*http.Request) (string, error) { return "ana", nil }
 
 	w := do(t, s.Handler(), "POST", "/fs/mkdir", `{"path":"/d"}`)
