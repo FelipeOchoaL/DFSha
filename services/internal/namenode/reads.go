@@ -52,6 +52,10 @@ func (s *RESTServer) handleLocations(w http.ResponseWriter, r *http.Request, _ s
 		writeNamespaceError(w, err)
 		return
 	}
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{File: AccessRead}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
 	if s.Nodes == nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "error interno del servidor")
 		return

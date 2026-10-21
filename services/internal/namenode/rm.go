@@ -36,6 +36,10 @@ func (s *RESTServer) handleRm(w http.ResponseWriter, r *http.Request, user strin
 	s.up.mu.Lock()
 	defer s.up.mu.Unlock()
 
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Parent: AccessWrite | AccessExec}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
 	// Una subida en curso solo puede cancelarla quien la abrió.
 	if u, ok := s.up.byPath[norm]; ok && u.owner != user {
 		writeError(w, http.StatusForbidden, codeForbidden, "la subida pertenece a otro usuario: "+norm)

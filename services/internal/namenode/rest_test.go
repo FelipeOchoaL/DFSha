@@ -217,6 +217,7 @@ func TestMkdirUsaElUsuarioAutenticado(t *testing.T) {
 	ns := NewNamespace()
 	s := NewRESTServer(ns, NewBlockMap(), newFakePlacer(4))
 	s.Authenticate = func(*http.Request) (string, error) { return "ana", nil }
+	must(t, ns.SetMode("/", 0o777)) // los usuarios de esta prueba pueden crear en la raiz
 
 	w := do(t, s.Handler(), "POST", "/fs/mkdir", `{"path":"/d"}`)
 	if w.Code != 201 {

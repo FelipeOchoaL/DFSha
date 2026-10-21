@@ -172,6 +172,7 @@ func TestRmDeLaSubidaDeOtroUsuario(t *testing.T) {
 	e := newWriteEnv(t, 3)
 	user := "ana"
 	e.srv.Authenticate = func(*http.Request) (string, error) { return user, nil }
+	must(t, e.ns.SetMode("/", 0o777)) // los usuarios de esta prueba pueden crear en la raiz
 	e.mustAllocate("/f", 0, 10, "")
 
 	user = "bob"

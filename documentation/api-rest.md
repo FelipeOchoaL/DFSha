@@ -45,7 +45,7 @@ Toda respuesta con código HTTP 4xx o 5xx tiene este cuerpo:
 | 400 | `IS_A_DIRECTORY` | Se usó `rm` sobre un directorio (usar `rmdir`). |
 | 401 | `UNAUTHORIZED` | Falta el token, está mal formado, expiró o la firma es inválida. |
 | 401 | `INVALID_CREDENTIALS` | Usuario o contraseña incorrectos en el login. |
-| 403 | `FORBIDDEN` | El usuario no tiene permiso sobre la ruta (ver F8, US-82). |
+| 403 | `FORBIDDEN` | El usuario no tiene permiso sobre la ruta (ver sección 4.6), o intenta continuar la subida de otro usuario. |
 | 404 | `NOT_FOUND` | La ruta, el archivo o el directorio no existe. |
 | 404 | `PARENT_NOT_FOUND` | Un directorio padre no existe y no se pidió crearlo. |
 | 409 | `ALREADY_EXISTS` | La ruta ya existe (archivo `COMPLETE` o directorio). |
@@ -97,6 +97,7 @@ Tras un failover, el NameNode promovido no conoce todavía en qué DataNodes est
 | POST | `/fs/mkdir` | Crear un directorio | 201 |
 | DELETE | `/fs/rmdir` | Eliminar un directorio vacío | 204 |
 | DELETE | `/fs/rm` | Eliminar un archivo y sus bloques | 204 |
+| POST | `/fs/chmod` | Cambiar los permisos de un archivo o directorio | 200 |
 | POST | `/files/allocate` | Pedir dónde escribir un bloque | 200 |
 | POST | `/files/commit` | Confirmar un bloque escrito | 200 |
 | POST | `/files/finalize` | Cerrar el archivo (`COMPLETE`) | 201 |
@@ -154,6 +155,9 @@ Lista el contenido de un directorio. Si `path` es un archivo, devuelve una sola 
       "type": "dir",
       "size": 0,
       "owner": "ana",
+      "group": "estudiantes",
+      "mode": "0750",
+      "permissions": "rwxr-x---",
       "modifiedAt": "2026-03-01T15:04:05Z"
     },
     {
@@ -161,6 +165,9 @@ Lista el contenido de un directorio. Si `path` es un archivo, devuelve una sola 
       "type": "file",
       "size": 20971520,
       "owner": "ana",
+      "group": "estudiantes",
+      "mode": "0640",
+      "permissions": "rw-r-----",
       "modifiedAt": "2026-03-01T15:10:00Z",
       "state": "COMPLETE"
     }
@@ -172,6 +179,8 @@ Lista el contenido de un directorio. Si `path` es un archivo, devuelve una sola 
 - `state`: solo para archivos; `COMPLETE` o `UNDER_CONSTRUCTION`.
 - Las entradas vienen ordenadas por nombre.
 - En directorios `size` es `0`.
+- `group` es el grupo del archivo (se omite si no tiene). `mode` son los permisos en octal y `permissions` los mismos en formato `rwxr-x---` (dueño, grupo, otros).
+- Listar un directorio exige permiso de lectura (`r`) sobre él; ver sección 4.6.
 
 **Errores:** `400 INVALID_PATH`, `401`, `403 FORBIDDEN`, `404 NOT_FOUND`.
 
@@ -217,6 +226,48 @@ Elimina un **archivo** del namespace y ordena la eliminación de sus bloques en 
 **Errores:** `400 INVALID_PATH`, `400 IS_A_DIRECTORY`, `401`, `403`, `404 NOT_FOUND`.
 
 ---
+
+### 4.5 `POST /fs/chmod`
+
+Cambia los permisos de un archivo o directorio. Solo puede hacerlo su dueño o un superusuario.
+
+**Request**
+
+```json
+{
+  "path": "/user/ana/datos.csv",
+  "mode": "0644"
+}
+```
+
+`mode` es octal de 3 o 4 dígitos entre `000` y `0777`.
+
+**Response 200**
+
+```json
+{ "path": "/user/ana/datos.csv", "mode": "0644" }
+```
+
+**Errores:** `400 INVALID_REQUEST` (falta `path`/`mode` o el modo no es octal válido), `400 INVALID_PATH`, `401`, `403` (no es el dueño), `404 NOT_FOUND`.
+
+### 4.6 Permisos de acceso (usuarios y grupos)
+
+Cada archivo y directorio tiene un **dueño**, un **grupo** y permisos `rwx` para el dueño, el grupo y los demás, como en Linux.
+
+| Operación | Permisos que se exigen |
+|---|---|
+| Llegar a cualquier ruta | `x` en todos los directorios del camino |
+| `ls` de un directorio | `r` sobre el directorio |
+| `locations` (get) | `r` sobre el archivo |
+| `mkdir`, `allocate` (crear), `rmdir`, `rm` | `w` y `x` sobre el directorio que contiene la entrada |
+| `chmod` | ser el dueño |
+
+- Se aplica la regla del dueño, si no la del grupo (el usuario pertenece al grupo del archivo), si no la de los demás.
+- **Valores por defecto:** los directorios nuevos son `0750` y los archivos `0640`; el grupo es el primer grupo del usuario. Un archivo recién creado es privado: otros usuarios no lo ven salvo que el dueño abra permisos con `chmod`.
+- **Directorio personal:** en el primer login se crean `/user` (dueño `root`, `0755`) y `/user/<usuario>` (dueño el usuario, `0750`).
+- **Superusuario:** el usuario `root` y los miembros del grupo `admin` pueden todo.
+- Si el usuario no puede ver el directorio que contiene una ruta, recibe `403` exista o no lo que busca: no se revela su existencia.
+- Quien abrió una subida (`allocate`) es el único que puede continuarla (`allocate`, `commit`, `finalize`), aunque otros tengan permiso de escritura en el directorio.
 
 ## 5. Escritura de archivos (write-once)
 
@@ -389,7 +440,6 @@ Devuelve, en orden, los bloques de un archivo y los DataNodes **vivos** que tien
 Estos cambios se anunciarán al equipo con la etiqueta `contract-change` cuando se implementen:
 
 - **US-84, token de bloque:** `allocate` y `locations` añadirán un campo `accessToken` por bloque, que el cliente reenvía al DataNode en `WriteBlock`/`ReadBlock`. Es un campo nuevo; los clientes que lo ignoren seguirán parseando la respuesta.
-- **US-82, permisos:** se añadirán `group` y `permissions` a las entradas de `ls`.
 
 ---
 

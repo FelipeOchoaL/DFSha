@@ -198,6 +198,10 @@ func (s *RESTServer) handleAllocate(w http.ResponseWriter, r *http.Request, user
 		uploadI string
 	)
 	if isNew {
+		if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Parent: AccessWrite | AccessExec}); err != nil {
+			writeNamespaceError(w, err)
+			return
+		}
 		if err := s.ns.CanCreateFile(norm); err != nil {
 			s.writeStartUploadError(w, norm, err)
 			return
@@ -223,6 +227,10 @@ func (s *RESTServer) handleAllocate(w http.ResponseWriter, r *http.Request, user
 	entry := EditEntry{
 		Op: OpAllocate, Time: s.stamp(), Path: norm, Owner: user,
 		UploadID: uploadI, NewUpload: isNew, BlockIndex: req.BlockIndex, Size: req.Size,
+	}
+	if isNew {
+		entry.Group = principalOf(r).PrimaryGroup()
+		entry.Mode = defaultFileMode
 	}
 	resp := allocateResponse{UploadID: uploadI, BlockIndex: req.BlockIndex, Size: req.Size, Pipeline: []PipelineNode{}}
 	if u != nil {

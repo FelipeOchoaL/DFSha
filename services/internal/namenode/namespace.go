@@ -51,6 +51,8 @@ type Entry struct {
 	Type    NodeType
 	Size    int64
 	Owner   string
+	Group   string
+	Mode    uint32 // permisos rwx (0o750...)
 	ModTime time.Time
 	// State solo aplica a archivos; vacío en directorios.
 	State FileState
@@ -61,6 +63,8 @@ type inode struct {
 	name     string
 	isDir    bool
 	owner    string
+	group    string
+	mode     uint32
 	modTime  time.Time
 	size     int64
 	state    FileState
@@ -73,6 +77,8 @@ func (n *inode) entry() Entry {
 		Type:    TypeFile,
 		Size:    n.size,
 		Owner:   n.owner,
+		Group:   n.group,
+		Mode:    n.mode,
 		ModTime: n.modTime,
 	}
 	if n.isDir {
@@ -98,6 +104,7 @@ func NewNamespace() *Namespace {
 	ns.root = &inode{
 		isDir:    true,
 		owner:    "root",
+		mode:     0o755,
 		modTime:  time.Unix(0, 0).UTC(), // fija: la raíz no cambia entre reinicios sin hijos
 		children: make(map[string]*inode),
 	}
@@ -164,6 +171,11 @@ func (ns *Namespace) parentOf(norm string) (*inode, string, error) {
 // Mkdir crea un directorio. Con parents=true crea también los padres que falten
 // y no falla si el directorio ya existe (como mkdir -p).
 func (ns *Namespace) Mkdir(p, owner string, parents bool) error {
+	return ns.MkdirAs(p, owner, "", defaultDirMode, parents)
+}
+
+// MkdirAs es Mkdir con grupo y permisos explicitos para los directorios que cree.
+func (ns *Namespace) MkdirAs(p, owner, group string, mode uint32, parents bool) error {
 	norm, err := NormalizePath(p)
 	if err != nil {
 		return err
@@ -186,7 +198,7 @@ func (ns *Namespace) Mkdir(p, owner string, parents bool) error {
 		if _, exists := parent.children[name]; exists {
 			return fmt.Errorf("%w: %s", ErrAlreadyExists, norm)
 		}
-		ns.addChild(parent, newDir(name, owner, ns.now()))
+		ns.addChild(parent, newDir(name, owner, group, mode, ns.now()))
 		return nil
 	}
 
@@ -211,7 +223,7 @@ func (ns *Namespace) Mkdir(p, owner string, parents bool) error {
 	for _, part := range parts {
 		next, ok := cur.children[part]
 		if !ok {
-			next = newDir(part, owner, ns.now())
+			next = newDir(part, owner, group, mode, ns.now())
 			ns.addChild(cur, next)
 		}
 		cur = next
@@ -264,6 +276,11 @@ func (ns *Namespace) Stat(p string) (Entry, error) {
 // ErrAlreadyExists si la ruta ya existe: es la operación atómica que usa
 // allocate para que de dos subidas simultáneas al mismo path solo gane una.
 func (ns *Namespace) CreateFile(p, owner string) error {
+	return ns.CreateFileAs(p, owner, "", defaultFileMode)
+}
+
+// CreateFileAs es CreateFile con grupo y permisos explicitos.
+func (ns *Namespace) CreateFileAs(p, owner, group string, mode uint32) error {
 	norm, err := NormalizePath(p)
 	if err != nil {
 		return err
@@ -286,6 +303,8 @@ func (ns *Namespace) CreateFile(p, owner string) error {
 		owner:   owner,
 		modTime: ns.now(),
 		state:   StateUnderConstruction,
+		group:   group,
+		mode:    mode,
 	})
 	return nil
 }
@@ -378,11 +397,13 @@ func notFoundIfParentMissing(err error, norm string) error {
 	return err
 }
 
-func newDir(name, owner string, t time.Time) *inode {
+func newDir(name, owner, group string, mode uint32, t time.Time) *inode {
 	return &inode{
 		name:     name,
 		isDir:    true,
 		owner:    owner,
+		group:    group,
+		mode:     mode,
 		modTime:  t,
 		children: make(map[string]*inode),
 	}
@@ -439,6 +460,8 @@ type snapInode struct {
 	Name     string       `json:"name"`
 	Dir      bool         `json:"dir,omitempty"`
 	Owner    string       `json:"owner"`
+	Group    string       `json:"group,omitempty"`
+	Mode     *uint32      `json:"mode,omitempty"` // nil en snapshots antiguos: se usan los permisos por defecto
 	ModTime  time.Time    `json:"modTime"`
 	Size     int64        `json:"size,omitempty"`
 	State    FileState    `json:"state,omitempty"`
@@ -453,10 +476,13 @@ func (ns *Namespace) export() *snapInode {
 }
 
 func exportInode(n *inode) *snapInode {
+	mode := n.mode
 	s := &snapInode{
 		Name:    n.name,
 		Dir:     n.isDir,
 		Owner:   n.owner,
+		Group:   n.group,
+		Mode:    &mode,
 		ModTime: n.modTime,
 		Size:    n.size,
 		State:   n.state,
@@ -494,9 +520,19 @@ func restoreInode(s *snapInode, where string) (*inode, error) {
 		name:    s.Name,
 		isDir:   s.Dir,
 		owner:   s.Owner,
+		group:   s.Group,
 		modTime: s.ModTime,
 		size:    s.Size,
 		state:   s.State,
+	}
+	if s.Mode != nil {
+		n.mode = *s.Mode
+	} else if where == "/" {
+		n.mode = 0o755 // raiz de un snapshot antiguo
+	} else if s.Dir {
+		n.mode = defaultDirMode
+	} else {
+		n.mode = defaultFileMode
 	}
 	if !s.Dir {
 		if len(s.Children) > 0 {

@@ -10,6 +10,7 @@ package namenode
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -88,13 +89,18 @@ type RESTServer struct {
 	// NameNode es promovido (lo implementa el registro de DataNodes, US-22).
 	Reregistrar Reregistrar
 
-	// Authenticate identifica al usuario de una petición. Si devuelve error la
-	// petición se rechaza con 401 UNAUTHORIZED.
+	// Identify identifica al usuario de una petición y sus grupos (del JWT, US-80).
+	// Si devuelve error la petición se rechaza con 401 UNAUTHORIZED. Es lo que usa el
+	// control de acceso por usuario y grupo (access.go, US-82).
+	Identify func(r *http.Request) (Principal, error)
+
+	// Authenticate es la forma simple de Identify: solo devuelve el usuario, sin grupos.
+	// Se usa si Identify es nil.
 	//
-	// ATENCIÓN: por defecto NO valida nada y todas las peticiones son del usuario
-	// "anonymous". Hasta que exista el login con JWT (US-80, David) esta API no
-	// tiene autenticación ni control de acceso: no debe exponerse fuera de un
-	// entorno de desarrollo. US-80 reemplaza esta función por la que valida el token.
+	// ATENCIÓN: si no se asigna ni Identify ni Authenticate, la API no autentica y
+	// todas las peticiones son del usuario anónimo, que tiene todos los permisos.
+	// Hasta que exista el login con JWT (US-80, David) no debe exponerse fuera de un
+	// entorno de desarrollo.
 	Authenticate func(r *http.Request) (user string, err error)
 }
 
@@ -109,7 +115,6 @@ func NewRESTServer(ns *Namespace, blocks *BlockMap, placer BlockPlacer) *RESTSer
 		ReplicationFactor:  3,
 		CommitWait:         3 * time.Second,
 		CommitPollInterval: 50 * time.Millisecond,
-		Authenticate:       func(*http.Request) (string, error) { return anonymousUser, nil },
 	}
 }
 
@@ -124,6 +129,7 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("/files/finalize", s.route(http.MethodPost, s.handleFinalize))
 	mux.HandleFunc("/files/locations", s.route(http.MethodGet, s.handleLocations))
 	mux.HandleFunc("/fs/rm", s.route(http.MethodDelete, s.handleRm))
+	mux.HandleFunc("/fs/chmod", s.route(http.MethodPost, s.handleChmod))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
 	})
@@ -143,24 +149,28 @@ func (s *RESTServer) route(method string, h handlerFunc) http.HandlerFunc {
 				"método no permitido: use "+method)
 			return
 		}
-		user, err := s.Authenticate(r)
+		who, err := s.identify(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, codeUnauthorized, err.Error())
 			return
 		}
-		h(w, r, user)
+		who.Super = who.isSuper()
+		h(w, withPrincipal(r, who), who.User)
 	}
 }
 
 // --- /fs/ls ---
 
 type entryJSON struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Size       int64  `json:"size"`
-	Owner      string `json:"owner"`
-	ModifiedAt string `json:"modifiedAt"`
-	State      string `json:"state,omitempty"` // solo archivos
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	Owner       string `json:"owner"`
+	ModifiedAt  string `json:"modifiedAt"`
+	State       string `json:"state,omitempty"` // solo archivos
+	Group       string `json:"group,omitempty"`
+	Mode        string `json:"mode"`        // octal, p. ej. 0640
+	Permissions string `json:"permissions"` // simbolico, p. ej. rw-r-----
 }
 
 type lsResponse struct {
@@ -179,6 +189,10 @@ func (s *RESTServer) handleLs(w http.ResponseWriter, r *http.Request, _ string) 
 		writeNamespaceError(w, err)
 		return
 	}
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Dir: AccessRead}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
 	entries, err := s.ns.List(norm)
 	if err != nil {
 		writeNamespaceError(w, err)
@@ -187,12 +201,15 @@ func (s *RESTServer) handleLs(w http.ResponseWriter, r *http.Request, _ string) 
 	resp := lsResponse{Path: norm, Entries: make([]entryJSON, 0, len(entries))}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, entryJSON{
-			Name:       e.Name,
-			Type:       string(e.Type),
-			Size:       e.Size,
-			Owner:      e.Owner,
-			ModifiedAt: e.ModTime.UTC().Format(time.RFC3339),
-			State:      string(e.State),
+			Name:        e.Name,
+			Type:        string(e.Type),
+			Size:        e.Size,
+			Owner:       e.Owner,
+			ModifiedAt:  e.ModTime.UTC().Format(time.RFC3339),
+			State:       string(e.State),
+			Group:       e.Group,
+			Mode:        fmt.Sprintf("%04o", e.Mode),
+			Permissions: FormatMode(e.Mode),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -236,7 +253,16 @@ func (s *RESTServer) handleMkdir(w http.ResponseWriter, r *http.Request, user st
 			existed = true
 		}
 	}
-	entry := EditEntry{Op: OpMkdir, Time: s.stamp(), Path: norm, Owner: user, Parents: req.Parents}
+	who := principalOf(r)
+	need := AccessReq{Parent: AccessWrite | AccessExec, CreateParents: req.Parents}
+	if existed { // mkdir -p de algo que ya existe: no crea nada, basta poder llegar hasta ahi
+		need = AccessReq{}
+	}
+	if err := s.ns.Authorize(norm, who, need); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	entry := EditEntry{Op: OpMkdir, Time: s.stamp(), Path: norm, Owner: user, Group: who.PrimaryGroup(), Mode: defaultDirMode, Parents: req.Parents}
 	if err := s.applyMkdir(entry); err != nil {
 		writeNamespaceError(w, err)
 		return
@@ -268,6 +294,10 @@ func (s *RESTServer) handleRmdir(w http.ResponseWriter, r *http.Request, _ strin
 	s.up.mu.Lock()
 	defer s.up.mu.Unlock()
 
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Parent: AccessWrite | AccessExec}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
 	entry := EditEntry{Op: OpRmdir, Time: s.stamp(), Path: norm}
 	if err := s.applyRmdir(entry); err != nil {
 		writeNamespaceError(w, err)
@@ -300,6 +330,8 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 func writeNamespaceError(w http.ResponseWriter, err error) {
 	status, code := http.StatusInternalServerError, codeInternal
 	switch {
+	case errors.Is(err, ErrPermissionDenied):
+		status, code = http.StatusForbidden, codeForbidden
 	case errors.Is(err, ErrInvalidPath):
 		status, code = http.StatusBadRequest, codeInvalidPath
 	case errors.Is(err, ErrIsDirectory):

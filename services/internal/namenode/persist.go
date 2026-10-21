@@ -27,7 +27,7 @@ func (s *RESTServer) stamp() time.Time {
 
 func (s *RESTServer) applyMkdir(e EditEntry) error {
 	s.ns.setNow(e.Time)
-	return s.ns.Mkdir(e.Path, e.Owner, e.Parents)
+	return s.ns.MkdirAs(e.Path, e.Owner, e.Group, modeOr(e.Mode, defaultDirMode), e.Parents)
 }
 
 func (s *RESTServer) applyRmdir(e EditEntry) error {
@@ -56,7 +56,7 @@ func (s *RESTServer) applyAllocate(e EditEntry) error {
 			return fmt.Errorf("allocate: ya hay una subida de %s", e.Path)
 		}
 		s.ns.setNow(e.Time)
-		if err := s.ns.CreateFile(e.Path, e.Owner); err != nil {
+		if err := s.ns.CreateFileAs(e.Path, e.Owner, e.Group, modeOr(e.Mode, defaultFileMode)); err != nil {
 			return err
 		}
 		u = &upload{id: e.UploadID, owner: e.Owner, attempts: make(map[int]int)}
@@ -114,6 +114,11 @@ func (s *RESTServer) applyFinalize(e EditEntry) error {
 	return nil
 }
 
+// applyChmod cambia los permisos de un archivo o directorio.
+func (s *RESTServer) applyChmod(e EditEntry) error {
+	return s.ns.SetMode(e.Path, e.Mode)
+}
+
 // applyEntry aplica una entrada del edit log. Con up.mu tomado.
 func (s *RESTServer) applyEntry(e EditEntry) error {
 	var err error
@@ -128,6 +133,8 @@ func (s *RESTServer) applyEntry(e EditEntry) error {
 		err = s.applyAllocate(e)
 	case OpCommit:
 		err = s.applyCommit(e)
+	case OpChmod:
+		err = s.applyChmod(e)
 	case OpFinalize:
 		err = s.applyFinalize(e)
 	default:

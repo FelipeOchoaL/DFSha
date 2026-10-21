@@ -19,7 +19,10 @@ import (
 //     (namenode.BlockDeleter) para que /fs/rm ordene el borrado de bloques.
 //   - Servicio gRPC NameNode (US-22, US-23; David): registrarlo en registerGRPC.
 //   - Servicio gRPC NameNodeHA (US-71; James): registrarlo en registerGRPC.
-//   - Autenticación JWT (US-80; David): asignar rest.Authenticate.
+//   - Autenticación JWT (US-80; David): asignar rest.Identify, que devuelve el usuario y
+//     sus grupos del token (namenode.Principal). Sin esto la API no autentica y todos son
+//     superusuario. El login debe llamar a rest.EnsureHome(principal) tras validar la
+//     contraseña para crear /user/<usuario> en el primer inicio de sesión (US-82).
 
 // errNoRegistry se devuelve mientras el registro de DataNodes no esté integrado.
 var errNoRegistry = errors.New("el registro de DataNodes no está integrado")

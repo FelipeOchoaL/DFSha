@@ -400,6 +400,7 @@ func TestAutorizacionDeSubida(t *testing.T) {
 	e := newWriteEnv(t, 3)
 	user := "ana"
 	e.srv.Authenticate = func(*http.Request) (string, error) { return user, nil }
+	must(t, e.ns.SetMode("/", 0o777)) // los usuarios de esta prueba pueden crear en la raiz
 
 	a := e.mustAllocate("/f", 0, 10, "")
 	if en, _ := e.ns.Stat("/f"); en.Owner != "ana" {

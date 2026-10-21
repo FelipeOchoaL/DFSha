@@ -14,7 +14,7 @@ import (
 
 const (
 	snapshotFileName = "snapshot.json"
-	snapshotVersion  = 1
+	snapshotVersion  = 2 // 2 añade grupo y permisos; se siguen leyendo los de version 1
 )
 
 type snapCommitted struct {
@@ -97,7 +97,7 @@ func readSnapshot(dir string) (*snapshotFile, error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("snapshot %s corrupto: %w", path, err)
 	}
-	if snap.Version != snapshotVersion {
+	if snap.Version != 1 && snap.Version != snapshotVersion {
 		return nil, fmt.Errorf("snapshot %s: versión %d no soportada", path, snap.Version)
 	}
 	return &snap, nil

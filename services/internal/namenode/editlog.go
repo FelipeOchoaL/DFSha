@@ -35,6 +35,7 @@ const (
 	OpAllocate EditOp = "allocate"
 	OpCommit   EditOp = "commit"
 	OpFinalize EditOp = "finalize"
+	OpChmod    EditOp = "chmod"
 )
 
 // EditEntry es una operación de metadatos. Es el registro que se escribe en el
@@ -49,6 +50,8 @@ type EditEntry struct {
 
 	Owner   string `json:"owner,omitempty"`   // mkdir, allocate (primer bloque)
 	Parents bool   `json:"parents,omitempty"` // mkdir
+	Group   string `json:"group,omitempty"`   // mkdir, allocate (primer bloque): grupo del creador
+	Mode    uint32 `json:"mode,omitempty"`    // mkdir, allocate (primer bloque): permisos; chmod: los nuevos (0 = por defecto, salvo en chmod)
 
 	UploadID   string `json:"uploadId,omitempty"`   // allocate, commit, finalize
 	NewUpload  bool   `json:"newUpload,omitempty"`  // allocate: crea el archivo y abre la subida
