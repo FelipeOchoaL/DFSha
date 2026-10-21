@@ -17,16 +17,19 @@ const (
 	defaultRESTPort            = 8080
 	defaultGRPCPort            = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
 	defaultReplicationFactor   = 3
-	defaultCommitWaitMS        = 3000          // espera maxima de commit por las replicas (US-52)
-	defaultMetaDir             = "./data/meta" // edit log y snapshot (US-70); el directorio data/ no se sube a git
-	defaultSnapshotEvery       = 1000          // operaciones entre snapshots; 0 = solo por tiempo
-	defaultSnapshotIntervalSec = 300           // segundos entre snapshots periodicos; 0 = desactivado
-	defaultHATimeoutMS         = 2000          // espera maxima del ACK del standby (US-71)
-	defaultHASyncIntervalSec   = 5             // cada cuanto el activo pone al dia al standby; 0 = desactivado
-	defaultFailoverIntervalMS  = 1000          // entre pings al otro NameNode (US-72)
-	defaultFailoverFailures    = 3             // fallos seguidos para promover
-	defaultRecoveryWaitSec     = 30            // espera maxima de block reports tras promover
-	defaultRecoveryThreshold   = 0.999         // fraccion de bloques con replica conocida para terminar
+	defaultCommitWaitMS        = 3000                   // espera maxima de commit por las replicas (US-52)
+	defaultMetaDir             = "./data/meta"          // edit log y snapshot (US-70); el directorio data/ no se sube a git
+	defaultSnapshotEvery       = 1000                   // operaciones entre snapshots; 0 = solo por tiempo
+	defaultSnapshotIntervalSec = 300                    // segundos entre snapshots periodicos; 0 = desactivado
+	defaultHATimeoutMS         = 2000                   // espera maxima del ACK del standby (US-71)
+	defaultHASyncIntervalSec   = 5                      // cada cuanto el activo pone al dia al standby; 0 = desactivado
+	defaultFailoverIntervalMS  = 1000                   // entre pings al otro NameNode (US-72)
+	defaultFailoverFailures    = 3                      // fallos seguidos para promover
+	defaultRecoveryWaitSec     = 30                     // espera maxima de block reports tras promover
+	defaultRecoveryThreshold   = 0.999                  // fraccion de bloques con replica conocida para terminar
+	defaultTLSCertFile         = "./certs/namenode.crt" // certificado de este NameNode (US-86)
+	defaultTLSKeyFile          = "./certs/namenode.key" // su clave privada
+	defaultTLSCAFile           = "./certs/ca.crt"       // CA del proyecto
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -54,6 +57,10 @@ type config struct {
 	FailoverFailures  int           // FAILOVER_FAILURES: fallos seguidos para promover
 	RecoveryWait      time.Duration // RECOVERY_WAIT_SEC: espera maxima de block reports tras promover
 	RecoveryThreshold float64       // RECOVERY_THRESHOLD: fraccion de bloques con replica conocida
+	TLSEnabled        bool          // TLS_ENABLED: HTTPS en la REST y mTLS en el gRPC; false solo en desarrollo
+	TLSCertFile       string        // TLS_CERT_FILE
+	TLSKeyFile        string        // TLS_KEY_FILE
+	TLSCAFile         string        // TLS_CA_FILE
 }
 
 // loadConfig lee la configuración usando getenv (os.Getenv en producción).
@@ -135,6 +142,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.RecoveryThreshold, err = envFraction(getenv, "RECOVERY_THRESHOLD", defaultRecoveryThreshold); err != nil {
 		return config{}, err
 	}
+
+	if cfg.TLSEnabled, err = envBool(getenv, "TLS_ENABLED", true); err != nil {
+		return config{}, err
+	}
+	cfg.TLSCertFile = envString(getenv, "TLS_CERT_FILE", defaultTLSCertFile)
+	cfg.TLSKeyFile = envString(getenv, "TLS_KEY_FILE", defaultTLSKeyFile)
+	cfg.TLSCAFile = envString(getenv, "TLS_CA_FILE", defaultTLSCAFile)
 
 	switch cfg.Role {
 	case roleActive:

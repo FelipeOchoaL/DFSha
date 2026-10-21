@@ -13,6 +13,7 @@ Contrato entre el cliente (CLI/SDK Python) y el NameNode. El cliente se programa
 | Aspecto | Regla |
 |---|---|
 | URL base | `http(s)://<namenode>:<REST_PORT>` (por defecto `8080`). HTTPS cuando `TLS_ENABLED=true`. |
+| TLS | Con `TLS_ENABLED=true` (por defecto) la API es HTTPS con un certificado firmado por la CA del proyecto: el cliente debe verificarlo con esa CA y **no** presenta certificado propio (su identidad es el JWT). Con `TLS_ENABLED=false`, solo en desarrollo, es HTTP plano. El gRPC del NameNode usa mTLS (DataNodes y NameNode par). |
 | Formato | JSON UTF-8. Las peticiones con body llevan `Content-Type: application/json`. |
 | Nombres de campos | `camelCase`. |
 | Autenticación | `Authorization: Bearer <jwt>` en **todas** las rutas excepto `POST /auth/login`. |

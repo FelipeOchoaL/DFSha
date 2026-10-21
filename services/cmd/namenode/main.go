@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -40,7 +41,11 @@ func main() {
 // arranque no tenga que reproducir el edit log.
 func run(ctx context.Context, cfg config) error {
 	// Primero los metadatos: si no se pueden recuperar no se abre ningún puerto.
-	rest, grpcServer, err := newServers(cfg)
+	tlsCfg, err := loadTLS(cfg)
+	if err != nil {
+		return err
+	}
+	rest, grpcServer, err := newServers(cfg, tlsCfg)
 	if err != nil {
 		return err
 	}
@@ -57,6 +62,9 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	startFailover(ctx, rest, cfg)
+	if tlsCfg != nil {
+		restLn = tls.NewListener(restLn, tlsCfg.REST) // la REST pasa a ser HTTPS
+	}
 	go checkpointLoop(ctx, rest, cfg.SnapshotInterval)
 	go rest.RunStandbySync(ctx, cfg.HASyncInterval)
 	serveErr := serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer)
@@ -101,6 +109,11 @@ func serve(ctx context.Context, cfg config, restLn, grpcLn net.Listener, handler
 	log.Printf("NameNode iniciando id=%s rol=%s rest=%s grpc=%s replicacion=%d",
 		cfg.NodeID, cfg.Role, restLn.Addr(), grpcLn.Addr(), cfg.ReplicationFactor)
 	log.Printf("ADVERTENCIA: la API REST aún no autentica (US-80 pendiente): no exponerla fuera de desarrollo")
+	if cfg.TLSEnabled {
+		log.Printf("TLS activado: REST en HTTPS y gRPC con mTLS")
+	} else {
+		log.Printf("ADVERTENCIA: TLS desactivado (TLS_ENABLED=false): el tráfico no va cifrado; solo para desarrollo")
+	}
 
 	errs := make(chan error, 2)
 	go func() {

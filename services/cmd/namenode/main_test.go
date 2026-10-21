@@ -26,7 +26,8 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3,
 		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
-		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999}
+		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
+		TLSEnabled: true, TLSCertFile: "./certs/namenode.crt", TLSKeyFile: "./certs/namenode.key", TLSCAFile: "./certs/ca.crt"}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -50,7 +51,8 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2,
 		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
-		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999}
+		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
+		TLSEnabled: true, TLSCertFile: "./certs/namenode.crt", TLSKeyFile: "./certs/namenode.key", TLSCAFile: "./certs/ca.crt"}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -102,7 +104,7 @@ func TestServeLevantaRESTyGRPCYCierraLimpio(t *testing.T) {
 	cfg := config{NodeID: "nn-test", Role: roleActive, ReplicationFactor: 3}
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr, grpcAddr := restLn.Addr().String(), grpcLn.Addr().String()
-	rest, grpcServer, err := newServers(cfg)
+	rest, grpcServer, err := newServers(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +178,7 @@ func TestServeFallaSiUnServidorFalla(t *testing.T) {
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr := restLn.Addr().String()
 	grpcLn.Close() // gRPC no podrá aceptar conexiones
-	rest, grpcServer, err := newServers(cfg)
+	rest, grpcServer, err := newServers(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

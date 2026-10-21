@@ -7,6 +7,9 @@ import (
 	"dfsha/services/internal/namenode"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // Este archivo es el único punto donde el arranque conoce las piezas del
@@ -43,7 +46,7 @@ func (noDataNodes) LiveNode(string) (namenode.PipelineNode, bool) {
 // newServers arma el servidor REST y el servidor gRPC del NameNode. Si hay un
 // directorio de metadatos configurado recupera el estado guardado (snapshot +
 // edit log); si está corrupto devuelve error y el NameNode no arranca.
-func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
+func newServers(cfg config, tlsCfg *tlsSet) (*namenode.RESTServer, *grpc.Server, error) {
 	ns := namenode.NewNamespace()
 	blocks := namenode.NewBlockMap()
 	registry := noDataNodes{}
@@ -66,7 +69,11 @@ func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
 		return nil, nil, fmt.Errorf("activar la replicacion al standby: %w", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	var grpcOpts []grpc.ServerOption
+	if tlsCfg != nil {
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg.GRPCServer))) // mTLS
+	}
+	grpcServer := grpc.NewServer(grpcOpts...)
 	registerGRPC(grpcServer, ns, blocks)
 
 	return rest, grpcServer, nil
@@ -75,7 +82,11 @@ func newServers(cfg config) (*namenode.RESTServer, *grpc.Server, error) {
 // registerGRPC registra los servicios gRPC del NameNode. Por ahora no hay
 // ninguno: el contrato (proto/namenode.proto, US-03) y su código generado
 // (US-04) aún no están en main.
-func registerGRPC(_ *grpc.Server, _ *namenode.Namespace, _ *namenode.BlockMap) {}
+func registerGRPC(s *grpc.Server, _ *namenode.Namespace, _ *namenode.BlockMap) {
+	// Servicio de salud estandar de gRPC: permite comprobar que el puerto responde
+	// (y que el mTLS funciona) sin depender de los servicios del NameNode.
+	healthpb.RegisterHealthServer(s, health.NewServer())
+}
 
 // newStandbyClient crea el cliente que envía el edit log al NameNode standby,
 // o nil si no hay ninguno. Hoy devuelve nil porque falta el código generado del
