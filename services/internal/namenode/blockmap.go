@@ -353,3 +353,22 @@ func (m *BlockMap) restore(files map[string][]string, blocks map[string]snapBloc
 	}
 	m.byNode = make(map[string]map[string]struct{})
 }
+
+// ReplicaCoverage devuelve cuántos bloques confirmados hay y cuántos de ellos
+// tienen al menos una réplica conocida. Sirve para saber si los DataNodes ya
+// enviaron sus block reports tras una promoción (failover.go).
+func (m *BlockMap) ReplicaCoverage() (total, covered int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, rec := range m.blocks {
+		if rec.checksum == "" {
+			continue
+		}
+		total++
+		if len(rec.replicas) > 0 {
+			covered++
+		}
+	}
+	return total, covered
+}

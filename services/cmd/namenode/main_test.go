@@ -25,7 +25,8 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 	}
 	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3,
 		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
-		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second}
+		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
+		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -48,7 +49,8 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 	}
 	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2,
 		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
-		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second}
+		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
+		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -56,22 +58,28 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 
 func TestLoadConfigInvalida(t *testing.T) {
 	casos := map[string]map[string]string{
-		"puerto no numérico":            {"REST_PORT": "abc"},
-		"puerto fuera de rango":         {"GRPC_PORT": "70000"},
-		"puerto cero":                   {"REST_PORT": "0"},
-		"puertos iguales":               {"REST_PORT": "8080", "GRPC_PORT": "8080"},
-		"réplicas no numéricas":         {"REPLICATION_FACTOR": "tres"},
-		"réplicas cero":                 {"REPLICATION_FACTOR": "0"},
-		"snapshot negativo":             {"SNAPSHOT_EVERY": "-1"},
-		"intervalo negativo":            {"SNAPSHOT_INTERVAL_SEC": "-5"},
-		"intervalo no numerico":         {"SNAPSHOT_INTERVAL_SEC": "x"},
-		"espera negativa":               {"COMMIT_WAIT_MS": "-1"},
-		"espera no numerica":            {"COMMIT_WAIT_MS": "x"},
-		"rol desconocido":               {"NAMENODE_ROLE": "primary"},
-		"standby sin persistencia":      {"NAMENODE_ROLE": "standby", "META_DIR": "-"},
-		"HA_REQUIRE_ACK invalido":       {"HA_REQUIRE_ACK": "quizas"},
-		"HA_TIMEOUT_MS invalido":        {"HA_TIMEOUT_MS": "x"},
-		"HA_SYNC_INTERVAL_SEC negativo": {"HA_SYNC_INTERVAL_SEC": "-1"},
+		"puerto no numérico":             {"REST_PORT": "abc"},
+		"puerto fuera de rango":          {"GRPC_PORT": "70000"},
+		"puerto cero":                    {"REST_PORT": "0"},
+		"puertos iguales":                {"REST_PORT": "8080", "GRPC_PORT": "8080"},
+		"réplicas no numéricas":          {"REPLICATION_FACTOR": "tres"},
+		"réplicas cero":                  {"REPLICATION_FACTOR": "0"},
+		"snapshot negativo":              {"SNAPSHOT_EVERY": "-1"},
+		"intervalo negativo":             {"SNAPSHOT_INTERVAL_SEC": "-5"},
+		"intervalo no numerico":          {"SNAPSHOT_INTERVAL_SEC": "x"},
+		"espera negativa":                {"COMMIT_WAIT_MS": "-1"},
+		"espera no numerica":             {"COMMIT_WAIT_MS": "x"},
+		"rol desconocido":                {"NAMENODE_ROLE": "primary"},
+		"standby sin persistencia":       {"NAMENODE_ROLE": "standby", "META_DIR": "-"},
+		"HA_REQUIRE_ACK invalido":        {"HA_REQUIRE_ACK": "quizas"},
+		"HA_TIMEOUT_MS invalido":         {"HA_TIMEOUT_MS": "x"},
+		"FAILOVER_INTERVAL_MS cero":      {"FAILOVER_INTERVAL_MS": "0"},
+		"FAILOVER_FAILURES cero":         {"FAILOVER_FAILURES": "0"},
+		"RECOVERY_WAIT_SEC negativo":     {"RECOVERY_WAIT_SEC": "-1"},
+		"RECOVERY_THRESHOLD mayor que 1": {"RECOVERY_THRESHOLD": "1.5"},
+		"RECOVERY_THRESHOLD cero":        {"RECOVERY_THRESHOLD": "0"},
+		"RECOVERY_THRESHOLD no numerico": {"RECOVERY_THRESHOLD": "x"},
+		"HA_SYNC_INTERVAL_SEC negativo":  {"HA_SYNC_INTERVAL_SEC": "-1"},
 	}
 	for nombre, vars := range casos {
 		if _, err := loadConfig(env(vars)); err == nil {
@@ -374,5 +382,21 @@ func TestStandbyArrancaYResponde503(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run no terminó")
+	}
+}
+
+func TestLoadConfigFailover(t *testing.T) {
+	cfg, err := loadConfig(env(map[string]string{
+		"FAILOVER_INTERVAL_MS": "250",
+		"FAILOVER_FAILURES":    "5",
+		"RECOVERY_WAIT_SEC":    "0",
+		"RECOVERY_THRESHOLD":   "0.95",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FailoverInterval != 250*time.Millisecond || cfg.FailoverFailures != 5 ||
+		cfg.RecoveryWait != 0 || cfg.RecoveryThreshold != 0.95 {
+		t.Errorf("cfg = %+v", cfg)
 	}
 }

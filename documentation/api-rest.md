@@ -59,6 +59,7 @@ Toda respuesta con código HTTP 4xx o 5xx tiene este cuerpo:
 | 405 | `METHOD_NOT_ALLOWED` | Se usó un método HTTP distinto al del endpoint. La respuesta incluye la cabecera `Allow`. Una ruta desconocida responde `404 NOT_FOUND`. |
 | 500 | `INTERNAL_ERROR` | Error inesperado del servidor. |
 | 503 | `NAMENODE_STANDBY` | El NameNode contactado es el standby (ver sección 1.4). |
+| 503 | `NAMENODE_RECOVERING` | NameNode recién promovido que espera los block reports de los DataNodes. Afecta solo a `allocate` y `locations`; el resto de la API funciona. Es transitorio (segundos): ver sección 1.4. |
 | 503 | `INSUFFICIENT_DATANODES` | No hay suficientes DataNodes vivos para cumplir el factor de réplica. |
 
 ### 1.3 Códigos de éxito
@@ -82,6 +83,8 @@ Content-Type: application/json
 ```
 
 Regla para el cliente (US-73): ante timeout, error de conexión o un `503` con `code = NAMENODE_STANDBY`, probar la siguiente URL de `DFSHA_NAMENODES`. Un `503` con `code = INSUFFICIENT_DATANODES` **no** es señal de failover: el NameNode es el activo, simplemente faltan DataNodes; el cliente debe mostrar el error o reintentar más tarde sin cambiar de NameNode.
+
+Tras un failover, el NameNode promovido no conoce todavía en qué DataNodes están las réplicas (esa información no se persiste). Pide a los DataNodes que se registren de nuevo y, hasta recibir sus block reports (como máximo `RECOVERY_WAIT_SEC`, 30 s por defecto), responde `503 NAMENODE_RECOVERING` con `Retry-After: 1` a `allocate` y `locations`. Igual que `INSUFFICIENT_DATANODES`, **no** es señal para cambiar de NameNode: el cliente debe reintentar contra la misma URL tras la espera indicada. Las demás rutas (`ls`, `mkdir`, `rm`...) responden con normalidad.
 
 ---
 

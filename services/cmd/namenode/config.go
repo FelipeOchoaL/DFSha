@@ -23,6 +23,10 @@ const (
 	defaultSnapshotIntervalSec = 300           // segundos entre snapshots periodicos; 0 = desactivado
 	defaultHATimeoutMS         = 2000          // espera maxima del ACK del standby (US-71)
 	defaultHASyncIntervalSec   = 5             // cada cuanto el activo pone al dia al standby; 0 = desactivado
+	defaultFailoverIntervalMS  = 1000          // entre pings al otro NameNode (US-72)
+	defaultFailoverFailures    = 3             // fallos seguidos para promover
+	defaultRecoveryWaitSec     = 30            // espera maxima de block reports tras promover
+	defaultRecoveryThreshold   = 0.999         // fraccion de bloques con replica conocida para terminar
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -46,6 +50,10 @@ type config struct {
 	HARequireAck      bool          // HA_REQUIRE_ACK: el cliente solo recibe confirmacion si el standby aplico la operacion
 	HATimeout         time.Duration // HA_TIMEOUT_MS: espera maxima del ACK del standby
 	HASyncInterval    time.Duration // HA_SYNC_INTERVAL_SEC: cada cuanto se pone al dia al standby
+	FailoverInterval  time.Duration // FAILOVER_INTERVAL_MS: entre pings al otro NameNode
+	FailoverFailures  int           // FAILOVER_FAILURES: fallos seguidos para promover
+	RecoveryWait      time.Duration // RECOVERY_WAIT_SEC: espera maxima de block reports tras promover
+	RecoveryThreshold float64       // RECOVERY_THRESHOLD: fraccion de bloques con replica conocida
 }
 
 // loadConfig lee la configuración usando getenv (os.Getenv en producción).
@@ -104,6 +112,29 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	cfg.HASyncInterval = time.Duration(haSyncSec) * time.Second
+
+	foMS, err := envNonNegative(getenv, "FAILOVER_INTERVAL_MS", defaultFailoverIntervalMS)
+	if err != nil {
+		return config{}, err
+	}
+	if foMS == 0 {
+		return config{}, fmt.Errorf("FAILOVER_INTERVAL_MS debe ser mayor que 0")
+	}
+	cfg.FailoverInterval = time.Duration(foMS) * time.Millisecond
+	if cfg.FailoverFailures, err = envInt(getenv, "FAILOVER_FAILURES", defaultFailoverFailures); err != nil {
+		return config{}, err
+	}
+	if cfg.FailoverFailures <= 0 {
+		return config{}, fmt.Errorf("FAILOVER_FAILURES debe ser mayor que 0")
+	}
+	recSec, err := envNonNegative(getenv, "RECOVERY_WAIT_SEC", defaultRecoveryWaitSec)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.RecoveryWait = time.Duration(recSec) * time.Second
+	if cfg.RecoveryThreshold, err = envFraction(getenv, "RECOVERY_THRESHOLD", defaultRecoveryThreshold); err != nil {
+		return config{}, err
+	}
 
 	switch cfg.Role {
 	case roleActive:
@@ -175,6 +206,21 @@ func envBool(getenv func(string) string, key string, fallback bool) (bool, error
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
 		return false, fmt.Errorf("%s debe ser true o false: %w", key, err)
+	}
+	return v, nil
+}
+
+func envFraction(getenv func(string) string, key string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s debe ser un número: %w", key, err)
+	}
+	if v <= 0 || v > 1 {
+		return 0, fmt.Errorf("%s debe estar entre 0 (sin incluir) y 1", key)
 	}
 	return v, nil
 }

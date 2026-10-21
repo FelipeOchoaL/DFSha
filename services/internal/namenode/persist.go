@@ -155,7 +155,9 @@ func (s *RESTServer) journal(e *EditEntry) error {
 	if s.log == nil {
 		return nil
 	}
-	if err := s.log.Append(e); err != nil {
+	err := s.log.Append(e)
+	s.noteTx() // aunque falle la replicacion, la entrada ya esta en el log
+	if err != nil {
 		return err
 	}
 	s.maybeCheckpoint()
@@ -302,6 +304,7 @@ func (s *RESTServer) EnablePersistence(dir string, snapshotEvery int) error {
 	}
 	l.resume(last, replayed)
 	s.log = l
+	s.noteTx()
 	s.snapshotEvery = snapshotEvery
 	if snap != nil || replayed > 0 {
 		log.Printf("metadatos recuperados desde %s: snapshot hasta txid %d + %d entradas del log (último txid %d)",

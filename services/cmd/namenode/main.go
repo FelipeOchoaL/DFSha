@@ -56,6 +56,7 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("escuchar gRPC en :%d: %w", cfg.GRPCPort, err)
 	}
 
+	startFailover(ctx, rest, cfg)
 	go checkpointLoop(ctx, rest, cfg.SnapshotInterval)
 	go rest.RunStandbySync(ctx, cfg.HASyncInterval)
 	serveErr := serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer)
@@ -146,4 +147,31 @@ func shutdown(httpServer *http.Server, grpcServer *grpc.Server) {
 		grpcServer.Stop()
 		<-done
 	}
+}
+
+// startFailover activa la vigilancia del otro NameNode, si hay forma de
+// consultarlo (newPeerProbe). Un NameNode configurado como activo que
+// encuentra al otro ya activo arranca como standby; un standby que deja de
+// ver al activo se promueve.
+func startFailover(ctx context.Context, rest *namenode.RESTServer, cfg config) {
+	probe := newPeerProbe(cfg)
+	if probe == nil {
+		return
+	}
+	if cfg.Role == roleActive {
+		rest.YieldToActivePeer(ctx, probe, cfg.FailoverInterval)
+	}
+	go rest.RunFailover(ctx, probe, namenode.FailoverOptions{
+		Interval:    cfg.FailoverInterval,
+		MaxFailures: cfg.FailoverFailures,
+		Promote: namenode.PromoteOptions{
+			ReportThreshold: cfg.RecoveryThreshold,
+			ReportWait:      cfg.RecoveryWait,
+			OnPromoted: func() {
+				if err := attachReplication(rest, cfg, true); err != nil {
+					log.Printf("AVISO: no se pudo activar la replicación hacia el otro NameNode: %v", err)
+				}
+			},
+		},
+	})
 }

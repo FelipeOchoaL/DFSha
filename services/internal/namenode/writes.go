@@ -158,6 +158,9 @@ type allocateResponse struct {
 // el archivo en UNDER_CONSTRUCTION y abre la subida. Repetir allocate para el
 // bloque pendiente lo descarta y asigna uno nuevo (reintento del cliente).
 func (s *RESTServer) handleAllocate(w http.ResponseWriter, r *http.Request, user string) {
+	if s.rejectIfRecovering(w) {
+		return
+	}
 	var req allocateRequest
 	if !decodeBody(w, r, &req) {
 		return

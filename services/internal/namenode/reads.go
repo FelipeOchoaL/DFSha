@@ -39,6 +39,9 @@ type locationsResponse struct {
 // la réplica i mod n) para que las lecturas en paralelo del cliente se repartan
 // entre los nodos en lugar de ir todas al primero.
 func (s *RESTServer) handleLocations(w http.ResponseWriter, r *http.Request, _ string) {
+	if s.rejectIfRecovering(w) {
+		return
+	}
 	p := r.URL.Query().Get("path")
 	if p == "" {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el parámetro obligatorio: path")

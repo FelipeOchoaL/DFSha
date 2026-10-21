@@ -63,9 +63,10 @@ type EditLog struct {
 	mu              sync.Mutex
 	dir             string
 	f               *os.File
-	next            int64 // txid de la próxima entrada
-	sinceCheckpoint int   // entradas escritas desde el último snapshot
-	failed          error // primer error de escritura; el log queda inutilizable
+	next            int64       // txid de la próxima entrada
+	sinceCheckpoint int         // entradas escritas desde el último snapshot
+	failed          error       // primer error de escritura; el log queda inutilizable
+	tail            []EditEntry // ultimas entradas escritas, para detectar logs divergentes
 
 	// OnAppend, si no es nil, se llama con cada entrada ya guardada en disco.
 	// Es el punto de enganche para replicarla al NameNode standby (US-71): si
@@ -110,6 +111,11 @@ func OpenEditLog(dir string) (*EditLog, []EditEntry, error) {
 		return nil, nil, err
 	}
 	l := &EditLog{dir: dir, f: f, next: 1}
+	if n := len(entries); n > tailSize {
+		l.tail = append([]EditEntry(nil), entries[n-tailSize:]...)
+	} else {
+		l.tail = append([]EditEntry(nil), entries...)
+	}
 	if n := len(entries); n > 0 {
 		l.next = entries[n-1].TxID + 1
 	}
@@ -181,6 +187,7 @@ func (l *EditLog) Append(e *EditEntry) error {
 	}
 	l.next++
 	l.sinceCheckpoint++
+	l.pushTail(*e)
 	if l.OnAppend != nil {
 		if err := l.OnAppend(*e); err != nil {
 			return fmt.Errorf("replicar la entrada %d: %w", e.TxID, err)
@@ -270,6 +277,7 @@ func (l *EditLog) AppendReplicated(e EditEntry) error {
 	}
 	l.next++
 	l.sinceCheckpoint++
+	l.pushTail(e)
 	return nil
 }
 
@@ -292,4 +300,27 @@ func (l *EditLog) Entries() ([]EditEntry, error) {
 	defer f.Close()
 	entries, _, err := readEditEntries(f)
 	return entries, err
+}
+
+// tailSize es cuántas entradas recientes conserva el log en memoria.
+const tailSize = 1024
+
+// pushTail registra e como la última entrada escrita. Con l.mu tomado.
+func (l *EditLog) pushTail(e EditEntry) {
+	l.tail = append(l.tail, e)
+	if len(l.tail) > tailSize {
+		l.tail = append([]EditEntry(nil), l.tail[len(l.tail)-tailSize:]...)
+	}
+}
+
+// EntryAt devuelve la entrada con ese txid si está entre las últimas escritas.
+func (l *EditLog) EntryAt(txid int64) (EditEntry, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.tail) - 1; i >= 0; i-- {
+		if l.tail[i].TxID == txid {
+			return l.tail[i], true
+		}
+	}
+	return EditEntry{}, false
 }

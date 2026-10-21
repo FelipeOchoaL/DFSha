@@ -48,11 +48,13 @@ type RESTServer struct {
 	ns            *Namespace
 	blocks        *BlockMap
 	placer        BlockPlacer
-	up            uploadTable // subidas en curso (ver writes.go)
-	log           *EditLog    // edit log persistente; nil si la persistencia no esta activada (persist.go)
-	snapshotEvery int         // cada cuantas operaciones se guarda un snapshot
-	standby       atomic.Bool // true si este NameNode es standby (ha.go)
-	replicator    *Replicator // replicacion al standby; nil si no esta activada (ha.go)
+	up            uploadTable                // subidas en curso (ver writes.go)
+	log           *EditLog                   // edit log persistente; nil si la persistencia no esta activada (persist.go)
+	snapshotEvery int                        // cada cuantas operaciones se guarda un snapshot
+	standby       atomic.Bool                // true si este NameNode es standby (ha.go)
+	replicator    atomic.Pointer[Replicator] // replicacion al standby; nil si no esta activada (ha.go)
+	recovering    atomic.Bool                // true mientras un NameNode recien promovido espera los block reports (failover.go)
+	lastTx        atomic.Int64               // ultimo txid del edit log, para PingInfo sin tomar locks
 
 	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
 	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
@@ -77,6 +79,14 @@ type RESTServer struct {
 	// implementa la cola de comandos del registro de DataNodes, US-22). Si es nil,
 	// rm no encola nada y los bloques los limpia el block report (US-58).
 	Deletes BlockDeleter
+
+	// NodeID identifica a este NameNode (NODE_ID); lo informa Ping y desempata cuando
+	// dos standby quieren promoverse.
+	NodeID string
+
+	// Reregistrar pide a los DataNodes que se registren de nuevo cuando este
+	// NameNode es promovido (lo implementa el registro de DataNodes, US-22).
+	Reregistrar Reregistrar
 
 	// Authenticate identifica al usuario de una petición. Si devuelve error la
 	// petición se rechaza con 401 UNAUTHORIZED.
