@@ -66,12 +66,16 @@ lectura, corrupcion, borrado y pipeline con tres DataNodes. Tambien verifican
 que una falla del ultimo nodo no borre un bloque ya confirmado y que el binario
 arranque y cierre mediante el mismo contexto utilizado por Ctrl+C.
 
-Los archivos de `services/gen/datanode/v1/` se generan con protoc 25.3,
-`protoc-gen-go` 1.34.1 y `protoc-gen-go-grpc` 1.4.0. Desde la raiz del repo:
+Los archivos de `services/gen/datanode/v1/` usan los contratos compartidos del
+equipo y las versiones de `scripts/gen_proto.ps1`: `grpcio-tools` 1.66.2,
+`protoc-gen-go` 1.36.6 y `protoc-gen-go-grpc` 1.5.1. Desde la raiz del repo:
 
-```text
-protoc -I proto --go_out=services --go_opt=module=dfsha/services --go-grpc_out=services --go-grpc_opt=module=dfsha/services datanode.proto
+```powershell
+.\scripts\gen_proto.ps1
 ```
+
+En Linux se puede usar `./scripts/gen_proto.sh`. Ambos scripts actualizan los
+stubs de Go y Python en la misma ejecucion.
 
 ## Alcance
 

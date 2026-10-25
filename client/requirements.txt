@@ -1,4 +1,8 @@
-# Dependencias del cliente
-requests
-grpcio
-grpcio-tools
+# Dependencias del cliente. grpcio y grpcio-tools deben ir en la misma versión.
+requests>=2.31,<3
+grpcio==1.66.2
+grpcio-tools==1.66.2
+protobuf>=5.26,<6
+
+# desarrollo / pruebas
+pytest>=8
