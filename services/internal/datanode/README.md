@@ -79,5 +79,11 @@ Esta entrega cubre US-06, US-10, US-11, US-12 y el arranque Go de US-13;
 adelanta el pipeline de US-51 y DeleteBlock de US-55. El registro, heartbeat,
 BlockReceived, comandos del NameNode, failover, tokens, TLS y cifrado en reposo
 siguen pendientes de sus contratos e integracion. El transporte actual usa
-gRPC sin TLS, destinado al desarrollo local. Las pruebas no validan AWS ni el
-DFS completo, cuyo NameNode y cliente aun tienen implementaciones pendientes.
+gRPC sin TLS y requiere un entorno de pruebas con acceso restringido.
+
+Las pruebas automaticas descritas arriba usan nodos locales. La validacion
+manual del 24 de octubre de 2026 en tres EC2 de AWS, sus capturas y el apagado
+final estan documentados en
+[Pruebas del DataNode en AWS](../../../documentation/evidencias/datanode-aws/2026-10-24/README.md).
+Esta validacion cubre el DataNode y su pipeline; el DFS completo sigue pendiente
+de integrar el NameNode y el cliente.
