@@ -8,7 +8,7 @@ import importlib
 import sys
 
 from client.config import load_config
-from client.core.errors import DfshaError
+from client.core.errors import DfshaError, NameNodeError
 from client.core.session import Session
 
 # comando -> (módulo en client/commands, historia que lo implementa)
@@ -80,9 +80,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return module.run(args, config, session) or 0
+    except NameNodeError as exc:
+        if exc.status == 401:
+            print("Error: sesión no válida o expirada. Ejecuta `dfsha login`.", file=sys.stderr)
+        elif exc.status == 403:
+            print(f"Error: permiso denegado. {exc}", file=sys.stderr)
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except DfshaError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\nCancelado.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

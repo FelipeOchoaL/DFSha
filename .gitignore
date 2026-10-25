@@ -1,6 +1,10 @@
 .env
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 data/
 *.exe
+*.part
+*.key
+*.pem
