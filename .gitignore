@@ -8,3 +8,7 @@ data/
 *.part
 *.key
 *.pem
+deploy/aws/node.env
+deploy/certs/ca.crt
+deploy/certs/**/node.crt
+deploy/certs/**/ca.crt

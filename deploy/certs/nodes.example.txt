@@ -1,0 +1,9 @@
+# Una línea por nodo: nombre y SAN (IP privada fija + IP pública del día).
+#   deploy/certs/gen_certs.sh from-file deploy/certs/nodes.example.txt
+# No subas ca.key ni node.key.
+nn1  IP:172.31.0.10  IP:<IP_PUBLICA_NN_ACTIVE>
+nn2  IP:172.31.0.11  IP:<IP_PUBLICA_NN_STANDBY>
+dn1  IP:172.31.0.21  IP:<IP_PUBLICA_DN1>
+dn2  IP:172.31.0.22  IP:<IP_PUBLICA_DN2>
+dn3  IP:172.31.0.23  IP:<IP_PUBLICA_DN3>
+dn4  IP:172.31.0.24  IP:<IP_PUBLICA_DN4>
