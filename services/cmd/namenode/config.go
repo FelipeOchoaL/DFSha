@@ -17,19 +17,19 @@ const (
 	defaultRESTPort            = 8080
 	defaultGRPCPort            = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
 	defaultReplicationFactor   = 3
-	defaultCommitWaitMS        = 3000                   // espera maxima de commit por las replicas (US-52)
-	defaultMetaDir             = "./data/meta"          // edit log y snapshot (US-70); el directorio data/ no se sube a git
-	defaultSnapshotEvery       = 1000                   // operaciones entre snapshots; 0 = solo por tiempo
-	defaultSnapshotIntervalSec = 300                    // segundos entre snapshots periodicos; 0 = desactivado
-	defaultHATimeoutMS         = 2000                   // espera maxima del ACK del standby (US-71)
-	defaultHASyncIntervalSec   = 5                      // cada cuanto el activo pone al dia al standby; 0 = desactivado
-	defaultFailoverIntervalMS  = 1000                   // entre pings al otro NameNode (US-72)
-	defaultFailoverFailures    = 3                      // fallos seguidos para promover
-	defaultRecoveryWaitSec     = 30                     // espera maxima de block reports tras promover
-	defaultRecoveryThreshold   = 0.999                  // fraccion de bloques con replica conocida para terminar
-	defaultTLSCertFile         = "./certs/namenode.crt" // certificado de este NameNode (US-86)
-	defaultTLSKeyFile          = "./certs/namenode.key" // su clave privada
-	defaultTLSCAFile           = "./certs/ca.crt"       // CA del proyecto
+	defaultCommitWaitMS        = 3000              // espera maxima de commit por las replicas (US-52)
+	defaultDataDir             = "./data"          // DATA_DIR: en los contenedores es el volumen /data
+	defaultSnapshotEvery       = 1000              // operaciones entre snapshots; 0 = solo por tiempo
+	defaultSnapshotIntervalSec = 300               // segundos entre snapshots periodicos; 0 = desactivado
+	defaultHATimeoutMS         = 2000              // espera maxima del ACK del standby (US-71)
+	defaultHASyncIntervalSec   = 5                 // cada cuanto el activo pone al dia al standby; 0 = desactivado
+	defaultFailoverIntervalMS  = 1000              // entre pings al otro NameNode (US-72)
+	defaultFailoverFailures    = 3                 // fallos seguidos para promover
+	defaultRecoveryWaitSec     = 30                // espera maxima de block reports tras promover
+	defaultRecoveryThreshold   = 0.999             // fraccion de bloques con replica conocida para terminar
+	defaultTLSCertFile         = "/certs/node.crt" // certificado de este nodo (gen_certs.sh deja <nodo>/node.crt, que se monta en /certs)
+	defaultTLSKeyFile          = "/certs/node.key" // su clave privada
+	defaultTLSCAFile           = "/certs/ca.crt"   // CA del proyecto
 )
 
 // Roles del NameNode. Solo "active" está implementado; "standby" llega con la
@@ -47,7 +47,9 @@ type config struct {
 	GRPCPort          int           // GRPC_PORT
 	ReplicationFactor int           // REPLICATION_FACTOR
 	CommitWait        time.Duration // COMMIT_WAIT_MS: milisegundos que commit espera las replicas
-	MetaDir           string        // META_DIR: donde se guardan el edit log y el snapshot; vacio = sin persistencia
+	AdvertiseAddr     string        // ADVERTISE_ADDR: direccion gRPC con la que otros nodos alcanzan a este NameNode
+	PeerAddr          string        // PEER_NAMENODE_ADDR (o el otro de NAMENODE_ADDRS): direccion gRPC del otro NameNode
+	MetaDir           string        // META_DIR (por defecto DATA_DIR/meta): edit log y snapshot; vacio = sin persistencia
 	SnapshotEvery     int           // SNAPSHOT_EVERY: operaciones entre snapshots
 	SnapshotInterval  time.Duration // SNAPSHOT_INTERVAL_SEC: tiempo entre snapshots periodicos
 	HARequireAck      bool          // HA_REQUIRE_ACK: el cliente solo recibe confirmacion si el standby aplico la operacion
@@ -94,7 +96,22 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg.CommitWait = time.Duration(waitMS) * time.Millisecond
 
-	if cfg.MetaDir, err = envDir(getenv, "META_DIR", defaultMetaDir); err != nil {
+	cfg.AdvertiseAddr = envString(getenv, "ADVERTISE_ADDR", "")
+	cfg.PeerAddr = envString(getenv, "PEER_NAMENODE_ADDR", "")
+	if cfg.PeerAddr == "" {
+		cfg.PeerAddr = otherNameNode(getenv("NAMENODE_ADDRS"), cfg.AdvertiseAddr)
+	}
+	if cfg.PeerAddr != "" && cfg.PeerAddr == cfg.AdvertiseAddr {
+		return config{}, fmt.Errorf("PEER_NAMENODE_ADDR no puede ser la direccion de este mismo NameNode (%s)", cfg.PeerAddr)
+	}
+
+	// Los metadatos van por defecto en DATA_DIR/meta: en los contenedores DATA_DIR=/data
+	// es el volumen que no se borra al redesplegar.
+	dataDir := strings.TrimRight(envString(getenv, "DATA_DIR", defaultDataDir), "/\\")
+	if dataDir == "" {
+		dataDir = "/"
+	}
+	if cfg.MetaDir, err = envDir(getenv, "META_DIR", strings.TrimRight(dataDir, "/")+"/meta"); err != nil {
 		return config{}, err
 	}
 	if cfg.SnapshotEvery, err = envNonNegative(getenv, "SNAPSHOT_EVERY", defaultSnapshotEvery); err != nil {
@@ -237,4 +254,23 @@ func envFraction(getenv func(string) string, key string, fallback float64) (floa
 		return 0, fmt.Errorf("%s debe estar entre 0 (sin incluir) y 1", key)
 	}
 	return v, nil
+}
+
+// otherNameNode devuelve, de la lista NAMENODE_ADDRS ("host:puerto,host:puerto"),
+// la dirección del otro NameNode: la única que no es la propia (ADVERTISE_ADDR).
+// Si no se puede saber con certeza devuelve "" (sin par: el NameNode funciona solo).
+func otherNameNode(list, self string) string {
+	if self == "" {
+		return ""
+	}
+	var others []string
+	for _, a := range strings.Split(list, ",") {
+		if a = strings.TrimSpace(a); a != "" && a != self {
+			others = append(others, a)
+		}
+	}
+	if len(others) == 1 {
+		return others[0]
+	}
+	return ""
 }

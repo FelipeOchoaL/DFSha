@@ -113,7 +113,7 @@ func (s *RESTServer) ReplicateEditLog(entries []EditEntry) (int64, error) {
 
 // sameEntry indica si dos entradas son la misma operación.
 func sameEntry(a, b EditEntry) bool {
-	return a.TxID == b.TxID && a.Op == b.Op && a.Time.Equal(b.Time) && a.Path == b.Path &&
+	return a.TxID == b.TxID && a.Op == b.Op && a.Time.UnixMilli() == b.Time.UnixMilli() && a.Path == b.Path &&
 		a.Owner == b.Owner && a.Parents == b.Parents && a.UploadID == b.UploadID &&
 		a.NewUpload == b.NewUpload && a.BlockID == b.BlockID && a.BlockIndex == b.BlockIndex &&
 		a.Size == b.Size && a.Checksum == b.Checksum

@@ -1,1 +1,28 @@
-# Imagen del NameNode: compila services/cmd/namenode y expone REST + gRPC.
+# Imagen del NameNode: compila services/cmd/namenode y expone REST (8080) + gRPC (9000).
+#
+# Contexto de build: la carpeta services/ (asi lo hacen deploy/aws/namenode.sh y el compose):
+#   docker build -f services/Dockerfile.namenode -t dfsha/namenode:latest services
+#
+# Configuracion por variables de entorno (ver deploy/aws/env/nn-*.env.example):
+#   NODE_ID, NAMENODE_ROLE, REST_PORT, GRPC_PORT, ADVERTISE_ADDR, PEER_NAMENODE_ADDR,
+#   REPLICATION_FACTOR, TLS_ENABLED, ...
+# Volumenes: /data (edit log y snapshot en /data/meta; no se borra al redesplegar) y
+# /certs (node.crt, node.key, ca.crt cuando TLS_ENABLED=true).
+#
+# Corre como root a proposito: /data suele ser un bind mount creado por Docker con dueno
+# root (-v /var/lib/dfsha/data:/data) y un usuario sin privilegios no podria escribir en el.
+
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/namenode ./cmd/namenode
+
+FROM alpine:3.20
+RUN mkdir -p /data /certs
+COPY --from=build /out/namenode /usr/local/bin/namenode
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 8080 9000
+ENTRYPOINT ["/usr/local/bin/namenode"]

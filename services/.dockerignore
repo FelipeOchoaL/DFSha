@@ -1,0 +1,4 @@
+# Lo que no debe entrar al contexto de build de las imagenes (se construyen desde services/).
+data/
+*.exe
+**/*_test.go

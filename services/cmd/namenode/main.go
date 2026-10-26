@@ -45,11 +45,11 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	rest, grpcServer, err := newServers(cfg, tlsCfg)
+	srv, err := newServers(cfg, tlsCfg)
 	if err != nil {
 		return err
 	}
-	defer rest.Close()
+	defer srv.Close()
 
 	restLn, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.RESTPort))
 	if err != nil {
@@ -61,15 +61,20 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("escuchar gRPC en :%d: %w", cfg.GRPCPort, err)
 	}
 
-	startFailover(ctx, rest, cfg)
+	startFailover(ctx, srv, cfg)
+	if srv.REST.IsStandby() {
+		log.Printf("%s sirve como STANDBY (responde 503 a la API REST hasta que se promueva)", cfg.NodeID)
+	} else {
+		log.Printf("%s sirve como NameNode ACTIVO", cfg.NodeID)
+	}
 	if tlsCfg != nil {
 		restLn = tls.NewListener(restLn, tlsCfg.REST) // la REST pasa a ser HTTPS
 	}
-	go checkpointLoop(ctx, rest, cfg.SnapshotInterval)
-	go rest.RunStandbySync(ctx, cfg.HASyncInterval)
-	serveErr := serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer)
+	go checkpointLoop(ctx, srv.REST, cfg.SnapshotInterval)
+	go srv.REST.RunStandbySync(ctx, cfg.HASyncInterval)
+	serveErr := serve(ctx, cfg, restLn, grpcLn, srv.REST.Handler(), srv.GRPC)
 
-	if err := rest.Checkpoint(); err != nil {
+	if err := srv.REST.Checkpoint(); err != nil {
 		log.Printf("AVISO: no se pudo guardar el snapshot final: %v", err)
 	}
 	return serveErr
@@ -162,26 +167,25 @@ func shutdown(httpServer *http.Server, grpcServer *grpc.Server) {
 	}
 }
 
-// startFailover activa la vigilancia del otro NameNode, si hay forma de
-// consultarlo (newPeerProbe). Un NameNode configurado como activo que
-// encuentra al otro ya activo arranca como standby; un standby que deja de
-// ver al activo se promueve.
-func startFailover(ctx context.Context, rest *namenode.RESTServer, cfg config) {
-	probe := newPeerProbe(cfg)
-	if probe == nil {
+// startFailover activa la vigilancia del otro NameNode, si hay otro configurado.
+// Un NameNode configurado como activo que encuentra al otro ya activo arranca
+// como standby; un standby que deja de ver al activo se promueve.
+func startFailover(ctx context.Context, srv *servers, cfg config) {
+	if srv.Peer == nil {
 		return
 	}
+	rest, peer := srv.REST, srv.Peer
 	if cfg.Role == roleActive {
-		rest.YieldToActivePeer(ctx, probe, cfg.FailoverInterval)
+		rest.YieldToActivePeer(ctx, peer, cfg.FailoverInterval)
 	}
-	go rest.RunFailover(ctx, probe, namenode.FailoverOptions{
+	go rest.RunFailover(ctx, peer, namenode.FailoverOptions{
 		Interval:    cfg.FailoverInterval,
 		MaxFailures: cfg.FailoverFailures,
 		Promote: namenode.PromoteOptions{
 			ReportThreshold: cfg.RecoveryThreshold,
 			ReportWait:      cfg.RecoveryWait,
 			OnPromoted: func() {
-				if err := attachReplication(rest, cfg, true); err != nil {
+				if err := attachReplication(rest, cfg, peer, true); err != nil {
 					log.Printf("AVISO: no se pudo activar la replicación hacia el otro NameNode: %v", err)
 				}
 			},

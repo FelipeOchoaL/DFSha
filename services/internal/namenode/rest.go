@@ -175,6 +175,7 @@ type entryJSON struct {
 
 type lsResponse struct {
 	Path    string      `json:"path"`
+	Type    string      `json:"type"` // dir o file: lo que es la ruta consultada
 	Entries []entryJSON `json:"entries"`
 }
 
@@ -198,7 +199,12 @@ func (s *RESTServer) handleLs(w http.ResponseWriter, r *http.Request, _ string) 
 		writeNamespaceError(w, err)
 		return
 	}
-	resp := lsResponse{Path: norm, Entries: make([]entryJSON, 0, len(entries))}
+	st, err := s.ns.Stat(norm)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	resp := lsResponse{Path: norm, Type: string(st.Type), Entries: make([]entryJSON, 0, len(entries))}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, entryJSON{
 			Name:        e.Name,

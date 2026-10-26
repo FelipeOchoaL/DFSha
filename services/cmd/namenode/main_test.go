@@ -27,7 +27,7 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
 		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
-		TLSEnabled: true, TLSCertFile: "./certs/namenode.crt", TLSKeyFile: "./certs/namenode.key", TLSCAFile: "./certs/ca.crt"}
+		TLSEnabled: true, TLSCertFile: "/certs/node.crt", TLSKeyFile: "/certs/node.key", TLSCAFile: "/certs/ca.crt"}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -52,7 +52,7 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
 		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
-		TLSEnabled: true, TLSCertFile: "./certs/namenode.crt", TLSKeyFile: "./certs/namenode.key", TLSCAFile: "./certs/ca.crt"}
+		TLSEnabled: true, TLSCertFile: "/certs/node.crt", TLSKeyFile: "/certs/node.key", TLSCAFile: "/certs/ca.crt"}
 	if cfg != want {
 		t.Errorf("cfg = %+v; quería %+v", cfg, want)
 	}
@@ -104,7 +104,7 @@ func TestServeLevantaRESTyGRPCYCierraLimpio(t *testing.T) {
 	cfg := config{NodeID: "nn-test", Role: roleActive, ReplicationFactor: 3}
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr, grpcAddr := restLn.Addr().String(), grpcLn.Addr().String()
-	rest, grpcServer, err := newServers(cfg, nil)
+	srv, err := newServers(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestServeLevantaRESTyGRPCYCierraLimpio(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- serve(ctx, cfg, restLn, grpcLn, rest.Handler(), grpcServer) }()
+	go func() { result <- serve(ctx, cfg, restLn, grpcLn, srv.REST.Handler(), srv.GRPC) }()
 
 	// REST: mkdir y ls funcionan.
 	resp, err := http.Post("http://"+restAddr+"/fs/mkdir", "application/json", strings.NewReader(`{"path":"/user/ana","parents":true}`))
@@ -178,13 +178,13 @@ func TestServeFallaSiUnServidorFalla(t *testing.T) {
 	restLn, grpcLn := listener(t), listener(t)
 	restAddr := restLn.Addr().String()
 	grpcLn.Close() // gRPC no podrá aceptar conexiones
-	rest, grpcServer, err := newServers(cfg, nil)
+	srv, err := newServers(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	result := make(chan error, 1)
-	go func() { result <- serve(context.Background(), cfg, restLn, grpcLn, rest.Handler(), grpcServer) }()
+	go func() { result <- serve(context.Background(), cfg, restLn, grpcLn, srv.REST.Handler(), srv.GRPC) }()
 
 	select {
 	case err := <-result:
@@ -400,5 +400,59 @@ func TestLoadConfigFailover(t *testing.T) {
 	if cfg.FailoverInterval != 250*time.Millisecond || cfg.FailoverFailures != 5 ||
 		cfg.RecoveryWait != 0 || cfg.RecoveryThreshold != 0.95 {
 		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadConfigParDeNameNodes(t *testing.T) {
+	// Explícito.
+	cfg, err := loadConfig(env(map[string]string{
+		"ADVERTISE_ADDR":     "172.31.0.10:9000",
+		"PEER_NAMENODE_ADDR": "172.31.0.11:9000",
+	}))
+	if err != nil || cfg.PeerAddr != "172.31.0.11:9000" || cfg.AdvertiseAddr != "172.31.0.10:9000" {
+		t.Errorf("explícito: %+v, %v", cfg, err)
+	}
+	// Deducido de NAMENODE_ADDRS quitando la dirección propia (como en deploy/aws/env).
+	cfg, err = loadConfig(env(map[string]string{
+		"ADVERTISE_ADDR": "172.31.0.11:9000",
+		"NAMENODE_ADDRS": "172.31.0.10:9000, 172.31.0.11:9000",
+	}))
+	if err != nil || cfg.PeerAddr != "172.31.0.10:9000" {
+		t.Errorf("deducido: %+v, %v", cfg, err)
+	}
+	// Sin poder saber cuál es el propio: sin par (el NameNode funciona solo).
+	for name, vars := range map[string]map[string]string{
+		"sin ADVERTISE_ADDR":   {"NAMENODE_ADDRS": "a:1,b:2"},
+		"una sola dirección":   {"ADVERTISE_ADDR": "a:1", "NAMENODE_ADDRS": "a:1"},
+		"tres direcciones":     {"ADVERTISE_ADDR": "a:1", "NAMENODE_ADDRS": "a:1,b:2,c:3"},
+		"sin ninguna variable": {},
+		"lista vacía con coma": {"ADVERTISE_ADDR": "a:1", "NAMENODE_ADDRS": ",,"},
+	} {
+		if cfg, err := loadConfig(env(vars)); err != nil || cfg.PeerAddr != "" {
+			t.Errorf("%s: PeerAddr=%q err=%v; quería vacío", name, cfg.PeerAddr, err)
+		}
+	}
+	// El par no puede ser él mismo.
+	if _, err := loadConfig(env(map[string]string{"ADVERTISE_ADDR": "a:1", "PEER_NAMENODE_ADDR": "a:1"})); err == nil {
+		t.Error("el par igual a la dirección propia debía fallar")
+	}
+}
+
+func TestMetaDirSalyDelDATA_DIR(t *testing.T) {
+	cases := []struct {
+		vars map[string]string
+		want string
+	}{
+		{nil, "./data/meta"},
+		{map[string]string{"DATA_DIR": "/data"}, "/data/meta"},
+		{map[string]string{"DATA_DIR": "/data/"}, "/data/meta"},
+		{map[string]string{"DATA_DIR": "/data", "META_DIR": "/otro"}, "/otro"},
+		{map[string]string{"DATA_DIR": "/data", "META_DIR": "-"}, ""},
+	}
+	for _, c := range cases {
+		cfg, err := loadConfig(env(c.vars))
+		if err != nil || cfg.MetaDir != c.want {
+			t.Errorf("%v: MetaDir=%q err=%v; quería %q", c.vars, cfg.MetaDir, err, c.want)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,12 +137,30 @@ func tlsConfig(t *testing.T, ca *pki) config {
 	}
 }
 
-// startNameNodeWith arranca run() y espera a que ready devuelva true.
+// startNameNodeWith arranca run() y espera a que ready devuelva true. El NameNode
+// se apaga solo al terminar la prueba aunque falle; stop puede llamarse antes y
+// devuelve el resultado de run.
 func startNameNodeWith(t *testing.T, cfg config, ready func() bool) (stop func() error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() { result <- run(ctx, cfg) }()
+
+	var once sync.Once
+	var stopErr error
+	stop = func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-result:
+			case <-time.After(10 * time.Second):
+				stopErr = fmt.Errorf("run no terminó al cancelar")
+			}
+		})
+		return stopErr
+	}
+	t.Cleanup(func() { _ = stop() })
+
 	deadline := time.Now().Add(10 * time.Second)
 	for !ready() {
 		select {
@@ -151,21 +170,11 @@ func startNameNodeWith(t *testing.T, cfg config, ready func() bool) (stop func()
 		default:
 		}
 		if time.Now().After(deadline) {
-			cancel()
 			t.Fatal("el NameNode no arrancó")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return func() error {
-		cancel()
-		select {
-		case err := <-result:
-			return err
-		case <-time.After(10 * time.Second):
-			t.Fatal("run no terminó al cancelar")
-			return nil
-		}
-	}
+	return stop
 }
 
 // grpcHealth hace un Check al puerto gRPC con las credenciales dadas.

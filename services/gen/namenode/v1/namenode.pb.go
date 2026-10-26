@@ -27,6 +27,61 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ReplicateStatus int32
+
+const (
+	ReplicateStatus_REPLICATE_STATUS_OK ReplicateStatus = 0
+	// Las entradas no continuan el log del standby: el activo reenvia desde last_applied_txid + 1.
+	ReplicateStatus_REPLICATE_STATUS_GAP ReplicateStatus = 1
+	// El receptor no es standby (ya fue promovido): el emisor debe degradarse.
+	ReplicateStatus_REPLICATE_STATUS_NOT_STANDBY ReplicateStatus = 2
+	// El standby ya tiene una entrada distinta con ese txid: hay que resincronizarlo.
+	ReplicateStatus_REPLICATE_STATUS_DIVERGED ReplicateStatus = 3
+)
+
+// Enum value maps for ReplicateStatus.
+var (
+	ReplicateStatus_name = map[int32]string{
+		0: "REPLICATE_STATUS_OK",
+		1: "REPLICATE_STATUS_GAP",
+		2: "REPLICATE_STATUS_NOT_STANDBY",
+		3: "REPLICATE_STATUS_DIVERGED",
+	}
+	ReplicateStatus_value = map[string]int32{
+		"REPLICATE_STATUS_OK":          0,
+		"REPLICATE_STATUS_GAP":         1,
+		"REPLICATE_STATUS_NOT_STANDBY": 2,
+		"REPLICATE_STATUS_DIVERGED":    3,
+	}
+)
+
+func (x ReplicateStatus) Enum() *ReplicateStatus {
+	p := new(ReplicateStatus)
+	*p = x
+	return p
+}
+
+func (x ReplicateStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ReplicateStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_namenode_proto_enumTypes[0].Descriptor()
+}
+
+func (ReplicateStatus) Type() protoreflect.EnumType {
+	return &file_namenode_proto_enumTypes[0]
+}
+
+func (x ReplicateStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ReplicateStatus.Descriptor instead.
+func (ReplicateStatus) EnumDescriptor() ([]byte, []int) {
+	return file_namenode_proto_rawDescGZIP(), []int{0}
+}
+
 type RegisterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Endpoint      *v1.DataNodeEndpoint   `protobuf:"bytes,1,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
@@ -688,6 +743,8 @@ type EditLogEntry struct {
 	//	*EditLogEntry_AllocateBlock
 	//	*EditLogEntry_CommitBlock
 	//	*EditLogEntry_FinalizeFile
+	//	*EditLogEntry_Rmdir
+	//	*EditLogEntry_Chmod
 	Op            isEditLogEntry_Op `protobuf_oneof:"op"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -789,6 +846,24 @@ func (x *EditLogEntry) GetFinalizeFile() *FinalizeFileOp {
 	return nil
 }
 
+func (x *EditLogEntry) GetRmdir() *RmdirOp {
+	if x != nil {
+		if x, ok := x.Op.(*EditLogEntry_Rmdir); ok {
+			return x.Rmdir
+		}
+	}
+	return nil
+}
+
+func (x *EditLogEntry) GetChmod() *ChmodOp {
+	if x != nil {
+		if x, ok := x.Op.(*EditLogEntry_Chmod); ok {
+			return x.Chmod
+		}
+	}
+	return nil
+}
+
 type isEditLogEntry_Op interface {
 	isEditLogEntry_Op()
 }
@@ -813,6 +888,14 @@ type EditLogEntry_FinalizeFile struct {
 	FinalizeFile *FinalizeFileOp `protobuf:"bytes,14,opt,name=finalize_file,json=finalizeFile,proto3,oneof"`
 }
 
+type EditLogEntry_Rmdir struct {
+	Rmdir *RmdirOp `protobuf:"bytes,15,opt,name=rmdir,proto3,oneof"`
+}
+
+type EditLogEntry_Chmod struct {
+	Chmod *ChmodOp `protobuf:"bytes,16,opt,name=chmod,proto3,oneof"`
+}
+
 func (*EditLogEntry_Mkdir) isEditLogEntry_Op() {}
 
 func (*EditLogEntry_Delete) isEditLogEntry_Op() {}
@@ -823,10 +906,19 @@ func (*EditLogEntry_CommitBlock) isEditLogEntry_Op() {}
 
 func (*EditLogEntry_FinalizeFile) isEditLogEntry_Op() {}
 
+func (*EditLogEntry_Rmdir) isEditLogEntry_Op() {}
+
+func (*EditLogEntry_Chmod) isEditLogEntry_Op() {}
+
 type MkdirOp struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Owner string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	Group string                 `protobuf:"bytes,3,opt,name=group,proto3" json:"group,omitempty"`
+	// Permisos rwx en octal (0750...). 0 = los de por defecto.
+	Mode uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	// Crear tambien los directorios padre que falten (mkdir -p).
+	Parents       bool `protobuf:"varint,5,opt,name=parents,proto3" json:"parents,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -873,6 +965,27 @@ func (x *MkdirOp) GetOwner() string {
 		return x.Owner
 	}
 	return ""
+}
+
+func (x *MkdirOp) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *MkdirOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *MkdirOp) GetParents() bool {
+	if x != nil {
+		return x.Parents
+	}
+	return false
 }
 
 type DeleteOp struct {
@@ -927,19 +1040,128 @@ func (x *DeleteOp) GetRecursive() bool {
 	return false
 }
 
-type AllocateBlockOp struct {
+// rmdir de un directorio vacio.
+type RmdirOp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	BlockIndex    uint32                 `protobuf:"varint,2,opt,name=block_index,json=blockIndex,proto3" json:"block_index,omitempty"`
-	BlockId       string                 `protobuf:"bytes,3,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
-	DatanodeIds   []string               `protobuf:"bytes,4,rep,name=datanode_ids,json=datanodeIds,proto3" json:"datanode_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RmdirOp) Reset() {
+	*x = RmdirOp{}
+	mi := &file_namenode_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RmdirOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RmdirOp) ProtoMessage() {}
+
+func (x *RmdirOp) ProtoReflect() protoreflect.Message {
+	mi := &file_namenode_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RmdirOp.ProtoReflect.Descriptor instead.
+func (*RmdirOp) Descriptor() ([]byte, []int) {
+	return file_namenode_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *RmdirOp) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+// Cambio de permisos. Aqui mode 0 es valido (---------).
+type ChmodOp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Mode          uint32                 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChmodOp) Reset() {
+	*x = ChmodOp{}
+	mi := &file_namenode_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChmodOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChmodOp) ProtoMessage() {}
+
+func (x *ChmodOp) ProtoReflect() protoreflect.Message {
+	mi := &file_namenode_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChmodOp.ProtoReflect.Descriptor instead.
+func (*ChmodOp) Descriptor() ([]byte, []int) {
+	return file_namenode_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ChmodOp) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ChmodOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+type AllocateBlockOp struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Path        string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	BlockIndex  uint32                 `protobuf:"varint,2,opt,name=block_index,json=blockIndex,proto3" json:"block_index,omitempty"`
+	BlockId     string                 `protobuf:"bytes,3,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
+	DatanodeIds []string               `protobuf:"bytes,4,rep,name=datanode_ids,json=datanodeIds,proto3" json:"datanode_ids,omitempty"`
+	// Subida a la que pertenece el bloque; el standby la conserva para que el cliente
+	// pueda continuarla tras un failover.
+	UploadId string `protobuf:"bytes,5,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
+	// true en el primer allocate: crea el archivo y abre la subida.
+	NewUpload bool `protobuf:"varint,6,opt,name=new_upload,json=newUpload,proto3" json:"new_upload,omitempty"`
+	// Dueno, grupo y permisos del archivo (solo se usan si new_upload).
+	Owner string `protobuf:"bytes,7,opt,name=owner,proto3" json:"owner,omitempty"`
+	Group string `protobuf:"bytes,8,opt,name=group,proto3" json:"group,omitempty"`
+	Mode  uint32 `protobuf:"varint,9,opt,name=mode,proto3" json:"mode,omitempty"`
+	// Tamano pedido para el bloque. block_id vacio = archivo vacio (no hay bloque).
+	Size          uint64 `protobuf:"varint,10,opt,name=size,proto3" json:"size,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AllocateBlockOp) Reset() {
 	*x = AllocateBlockOp{}
-	mi := &file_namenode_proto_msgTypes[15]
+	mi := &file_namenode_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1173,7 @@ func (x *AllocateBlockOp) String() string {
 func (*AllocateBlockOp) ProtoMessage() {}
 
 func (x *AllocateBlockOp) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[15]
+	mi := &file_namenode_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1186,7 @@ func (x *AllocateBlockOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocateBlockOp.ProtoReflect.Descriptor instead.
 func (*AllocateBlockOp) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{15}
+	return file_namenode_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *AllocateBlockOp) GetPath() string {
@@ -995,19 +1217,62 @@ func (x *AllocateBlockOp) GetDatanodeIds() []string {
 	return nil
 }
 
+func (x *AllocateBlockOp) GetUploadId() string {
+	if x != nil {
+		return x.UploadId
+	}
+	return ""
+}
+
+func (x *AllocateBlockOp) GetNewUpload() bool {
+	if x != nil {
+		return x.NewUpload
+	}
+	return false
+}
+
+func (x *AllocateBlockOp) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *AllocateBlockOp) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *AllocateBlockOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *AllocateBlockOp) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
 type CommitBlockOp struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Path           string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	BlockId        string                 `protobuf:"bytes,2,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
 	Size           uint64                 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
 	ChecksumSha256 string                 `protobuf:"bytes,4,opt,name=checksum_sha256,json=checksumSha256,proto3" json:"checksum_sha256,omitempty"`
+	UploadId       string                 `protobuf:"bytes,5,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CommitBlockOp) Reset() {
 	*x = CommitBlockOp{}
-	mi := &file_namenode_proto_msgTypes[16]
+	mi := &file_namenode_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1019,7 +1284,7 @@ func (x *CommitBlockOp) String() string {
 func (*CommitBlockOp) ProtoMessage() {}
 
 func (x *CommitBlockOp) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[16]
+	mi := &file_namenode_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1032,7 +1297,7 @@ func (x *CommitBlockOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitBlockOp.ProtoReflect.Descriptor instead.
 func (*CommitBlockOp) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{16}
+	return file_namenode_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CommitBlockOp) GetPath() string {
@@ -1063,17 +1328,25 @@ func (x *CommitBlockOp) GetChecksumSha256() string {
 	return ""
 }
 
+func (x *CommitBlockOp) GetUploadId() string {
+	if x != nil {
+		return x.UploadId
+	}
+	return ""
+}
+
 type FinalizeFileOp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	TotalSize     uint64                 `protobuf:"varint,2,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
+	UploadId      string                 `protobuf:"bytes,3,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FinalizeFileOp) Reset() {
 	*x = FinalizeFileOp{}
-	mi := &file_namenode_proto_msgTypes[17]
+	mi := &file_namenode_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1085,7 +1358,7 @@ func (x *FinalizeFileOp) String() string {
 func (*FinalizeFileOp) ProtoMessage() {}
 
 func (x *FinalizeFileOp) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[17]
+	mi := &file_namenode_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1098,7 +1371,7 @@ func (x *FinalizeFileOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalizeFileOp.ProtoReflect.Descriptor instead.
 func (*FinalizeFileOp) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{17}
+	return file_namenode_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *FinalizeFileOp) GetPath() string {
@@ -1115,6 +1388,13 @@ func (x *FinalizeFileOp) GetTotalSize() uint64 {
 	return 0
 }
 
+func (x *FinalizeFileOp) GetUploadId() string {
+	if x != nil {
+		return x.UploadId
+	}
+	return ""
+}
+
 type ReplicateEditLogRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entries       []*EditLogEntry        `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
@@ -1124,7 +1404,7 @@ type ReplicateEditLogRequest struct {
 
 func (x *ReplicateEditLogRequest) Reset() {
 	*x = ReplicateEditLogRequest{}
-	mi := &file_namenode_proto_msgTypes[18]
+	mi := &file_namenode_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1136,7 +1416,7 @@ func (x *ReplicateEditLogRequest) String() string {
 func (*ReplicateEditLogRequest) ProtoMessage() {}
 
 func (x *ReplicateEditLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[18]
+	mi := &file_namenode_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1149,7 +1429,7 @@ func (x *ReplicateEditLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicateEditLogRequest.ProtoReflect.Descriptor instead.
 func (*ReplicateEditLogRequest) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{18}
+	return file_namenode_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ReplicateEditLogRequest) GetEntries() []*EditLogEntry {
@@ -1160,15 +1440,18 @@ func (x *ReplicateEditLogRequest) GetEntries() []*EditLogEntry {
 }
 
 type ReplicateEditLogResponse struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	LastAppliedTxid uint64                 `protobuf:"varint,1,opt,name=last_applied_txid,json=lastAppliedTxid,proto3" json:"last_applied_txid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Ultimo txid aplicado por el standby (el ACK). Tambien se informa cuando status != OK.
+	LastAppliedTxid uint64          `protobuf:"varint,1,opt,name=last_applied_txid,json=lastAppliedTxid,proto3" json:"last_applied_txid,omitempty"`
+	Status          ReplicateStatus `protobuf:"varint,2,opt,name=status,proto3,enum=dfsha.namenode.v1.ReplicateStatus" json:"status,omitempty"`
+	Message         string          `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReplicateEditLogResponse) Reset() {
 	*x = ReplicateEditLogResponse{}
-	mi := &file_namenode_proto_msgTypes[19]
+	mi := &file_namenode_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1180,7 +1463,7 @@ func (x *ReplicateEditLogResponse) String() string {
 func (*ReplicateEditLogResponse) ProtoMessage() {}
 
 func (x *ReplicateEditLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[19]
+	mi := &file_namenode_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1193,7 +1476,7 @@ func (x *ReplicateEditLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicateEditLogResponse.ProtoReflect.Descriptor instead.
 func (*ReplicateEditLogResponse) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{19}
+	return file_namenode_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReplicateEditLogResponse) GetLastAppliedTxid() uint64 {
@@ -1201,6 +1484,20 @@ func (x *ReplicateEditLogResponse) GetLastAppliedTxid() uint64 {
 		return x.LastAppliedTxid
 	}
 	return 0
+}
+
+func (x *ReplicateEditLogResponse) GetStatus() ReplicateStatus {
+	if x != nil {
+		return x.Status
+	}
+	return ReplicateStatus_REPLICATE_STATUS_OK
+}
+
+func (x *ReplicateEditLogResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
 }
 
 type PingRequest struct {
@@ -1213,7 +1510,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_namenode_proto_msgTypes[20]
+	mi := &file_namenode_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1225,7 +1522,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[20]
+	mi := &file_namenode_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1238,7 +1535,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{20}
+	return file_namenode_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *PingRequest) GetNodeId() string {
@@ -1266,7 +1563,7 @@ type PingResponse struct {
 
 func (x *PingResponse) Reset() {
 	*x = PingResponse{}
-	mi := &file_namenode_proto_msgTypes[21]
+	mi := &file_namenode_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1575,7 @@ func (x *PingResponse) String() string {
 func (*PingResponse) ProtoMessage() {}
 
 func (x *PingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_namenode_proto_msgTypes[21]
+	mi := &file_namenode_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1588,7 @@ func (x *PingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResponse.ProtoReflect.Descriptor instead.
 func (*PingResponse) Descriptor() ([]byte, []int) {
-	return file_namenode_proto_rawDescGZIP(), []int{21}
+	return file_namenode_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PingResponse) GetNodeId() string {
@@ -1362,7 +1659,7 @@ const file_namenode_proto_rawDesc = "" +
 	"\vdatanode_id\x18\x01 \x01(\tR\n" +
 	"datanodeId\x122\n" +
 	"\x05block\x18\x02 \x01(\v2\x1c.dfsha.namenode.v1.BlockInfoR\x05block\"\x17\n" +
-	"\x15BlockReceivedResponse\"\x9d\x03\n" +
+	"\x15BlockReceivedResponse\"\x85\x04\n" +
 	"\fEditLogEntry\x12\x12\n" +
 	"\x04txid\x18\x01 \x01(\x04R\x04txid\x12*\n" +
 	"\x11timestamp_unix_ms\x18\x02 \x01(\x03R\x0ftimestampUnixMs\x122\n" +
@@ -1371,40 +1668,67 @@ const file_namenode_proto_rawDesc = "" +
 	"\x06delete\x18\v \x01(\v2\x1b.dfsha.namenode.v1.DeleteOpH\x00R\x06delete\x12K\n" +
 	"\x0eallocate_block\x18\f \x01(\v2\".dfsha.namenode.v1.AllocateBlockOpH\x00R\rallocateBlock\x12E\n" +
 	"\fcommit_block\x18\r \x01(\v2 .dfsha.namenode.v1.CommitBlockOpH\x00R\vcommitBlock\x12H\n" +
-	"\rfinalize_file\x18\x0e \x01(\v2!.dfsha.namenode.v1.FinalizeFileOpH\x00R\ffinalizeFileB\x04\n" +
-	"\x02op\"3\n" +
+	"\rfinalize_file\x18\x0e \x01(\v2!.dfsha.namenode.v1.FinalizeFileOpH\x00R\ffinalizeFile\x122\n" +
+	"\x05rmdir\x18\x0f \x01(\v2\x1a.dfsha.namenode.v1.RmdirOpH\x00R\x05rmdir\x122\n" +
+	"\x05chmod\x18\x10 \x01(\v2\x1a.dfsha.namenode.v1.ChmodOpH\x00R\x05chmodB\x04\n" +
+	"\x02op\"w\n" +
 	"\aMkdirOp\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
-	"\x05owner\x18\x02 \x01(\tR\x05owner\"<\n" +
+	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
+	"\x05group\x18\x03 \x01(\tR\x05group\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x18\n" +
+	"\aparents\x18\x05 \x01(\bR\aparents\"<\n" +
 	"\bDeleteOp\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
-	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x84\x01\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x1d\n" +
+	"\aRmdirOp\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"1\n" +
+	"\aChmodOp\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04mode\x18\x02 \x01(\rR\x04mode\"\x94\x02\n" +
 	"\x0fAllocateBlockOp\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1f\n" +
 	"\vblock_index\x18\x02 \x01(\rR\n" +
 	"blockIndex\x12\x19\n" +
 	"\bblock_id\x18\x03 \x01(\tR\ablockId\x12!\n" +
-	"\fdatanode_ids\x18\x04 \x03(\tR\vdatanodeIds\"{\n" +
+	"\fdatanode_ids\x18\x04 \x03(\tR\vdatanodeIds\x12\x1b\n" +
+	"\tupload_id\x18\x05 \x01(\tR\buploadId\x12\x1d\n" +
+	"\n" +
+	"new_upload\x18\x06 \x01(\bR\tnewUpload\x12\x14\n" +
+	"\x05owner\x18\a \x01(\tR\x05owner\x12\x14\n" +
+	"\x05group\x18\b \x01(\tR\x05group\x12\x12\n" +
+	"\x04mode\x18\t \x01(\rR\x04mode\x12\x12\n" +
+	"\x04size\x18\n" +
+	" \x01(\x04R\x04size\"\x98\x01\n" +
 	"\rCommitBlockOp\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x19\n" +
 	"\bblock_id\x18\x02 \x01(\tR\ablockId\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x04R\x04size\x12'\n" +
-	"\x0fchecksum_sha256\x18\x04 \x01(\tR\x0echecksumSha256\"C\n" +
+	"\x0fchecksum_sha256\x18\x04 \x01(\tR\x0echecksumSha256\x12\x1b\n" +
+	"\tupload_id\x18\x05 \x01(\tR\buploadId\"`\n" +
 	"\x0eFinalizeFileOp\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
-	"total_size\x18\x02 \x01(\x04R\ttotalSize\"T\n" +
+	"total_size\x18\x02 \x01(\x04R\ttotalSize\x12\x1b\n" +
+	"\tupload_id\x18\x03 \x01(\tR\buploadId\"T\n" +
 	"\x17ReplicateEditLogRequest\x129\n" +
-	"\aentries\x18\x01 \x03(\v2\x1f.dfsha.namenode.v1.EditLogEntryR\aentries\"F\n" +
+	"\aentries\x18\x01 \x03(\v2\x1f.dfsha.namenode.v1.EditLogEntryR\aentries\"\x9c\x01\n" +
 	"\x18ReplicateEditLogResponse\x12*\n" +
-	"\x11last_applied_txid\x18\x01 \x01(\x04R\x0flastAppliedTxid\"C\n" +
+	"\x11last_applied_txid\x18\x01 \x01(\x04R\x0flastAppliedTxid\x12:\n" +
+	"\x06status\x18\x02 \x01(\x0e2\".dfsha.namenode.v1.ReplicateStatusR\x06status\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"C\n" +
 	"\vPingRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1b\n" +
 	"\tlast_txid\x18\x02 \x01(\x04R\blastTxid\"a\n" +
 	"\fPingResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1b\n" +
 	"\tis_active\x18\x02 \x01(\bR\bisActive\x12\x1b\n" +
-	"\tlast_txid\x18\x03 \x01(\x04R\blastTxid2\xf9\x02\n" +
+	"\tlast_txid\x18\x03 \x01(\x04R\blastTxid*\x85\x01\n" +
+	"\x0fReplicateStatus\x12\x17\n" +
+	"\x13REPLICATE_STATUS_OK\x10\x00\x12\x18\n" +
+	"\x14REPLICATE_STATUS_GAP\x10\x01\x12 \n" +
+	"\x1cREPLICATE_STATUS_NOT_STANDBY\x10\x02\x12\x1d\n" +
+	"\x19REPLICATE_STATUS_DIVERGED\x10\x032\xf9\x02\n" +
 	"\bNameNode\x12S\n" +
 	"\bRegister\x12\".dfsha.namenode.v1.RegisterRequest\x1a#.dfsha.namenode.v1.RegisterResponse\x12V\n" +
 	"\tHeartbeat\x12#.dfsha.namenode.v1.HeartbeatRequest\x1a$.dfsha.namenode.v1.HeartbeatResponse\x12\\\n" +
@@ -1427,63 +1751,70 @@ func file_namenode_proto_rawDescGZIP() []byte {
 	return file_namenode_proto_rawDescData
 }
 
-var file_namenode_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_namenode_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_namenode_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_namenode_proto_goTypes = []any{
-	(*RegisterRequest)(nil),          // 0: dfsha.namenode.v1.RegisterRequest
-	(*RegisterResponse)(nil),         // 1: dfsha.namenode.v1.RegisterResponse
-	(*HeartbeatRequest)(nil),         // 2: dfsha.namenode.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),        // 3: dfsha.namenode.v1.HeartbeatResponse
-	(*Command)(nil),                  // 4: dfsha.namenode.v1.Command
-	(*ReplicateCommand)(nil),         // 5: dfsha.namenode.v1.ReplicateCommand
-	(*DeleteCommand)(nil),            // 6: dfsha.namenode.v1.DeleteCommand
-	(*BlockInfo)(nil),                // 7: dfsha.namenode.v1.BlockInfo
-	(*BlockReportRequest)(nil),       // 8: dfsha.namenode.v1.BlockReportRequest
-	(*BlockReportResponse)(nil),      // 9: dfsha.namenode.v1.BlockReportResponse
-	(*BlockReceivedRequest)(nil),     // 10: dfsha.namenode.v1.BlockReceivedRequest
-	(*BlockReceivedResponse)(nil),    // 11: dfsha.namenode.v1.BlockReceivedResponse
-	(*EditLogEntry)(nil),             // 12: dfsha.namenode.v1.EditLogEntry
-	(*MkdirOp)(nil),                  // 13: dfsha.namenode.v1.MkdirOp
-	(*DeleteOp)(nil),                 // 14: dfsha.namenode.v1.DeleteOp
-	(*AllocateBlockOp)(nil),          // 15: dfsha.namenode.v1.AllocateBlockOp
-	(*CommitBlockOp)(nil),            // 16: dfsha.namenode.v1.CommitBlockOp
-	(*FinalizeFileOp)(nil),           // 17: dfsha.namenode.v1.FinalizeFileOp
-	(*ReplicateEditLogRequest)(nil),  // 18: dfsha.namenode.v1.ReplicateEditLogRequest
-	(*ReplicateEditLogResponse)(nil), // 19: dfsha.namenode.v1.ReplicateEditLogResponse
-	(*PingRequest)(nil),              // 20: dfsha.namenode.v1.PingRequest
-	(*PingResponse)(nil),             // 21: dfsha.namenode.v1.PingResponse
-	(*v1.DataNodeEndpoint)(nil),      // 22: dfsha.datanode.v1.DataNodeEndpoint
+	(ReplicateStatus)(0),             // 0: dfsha.namenode.v1.ReplicateStatus
+	(*RegisterRequest)(nil),          // 1: dfsha.namenode.v1.RegisterRequest
+	(*RegisterResponse)(nil),         // 2: dfsha.namenode.v1.RegisterResponse
+	(*HeartbeatRequest)(nil),         // 3: dfsha.namenode.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),        // 4: dfsha.namenode.v1.HeartbeatResponse
+	(*Command)(nil),                  // 5: dfsha.namenode.v1.Command
+	(*ReplicateCommand)(nil),         // 6: dfsha.namenode.v1.ReplicateCommand
+	(*DeleteCommand)(nil),            // 7: dfsha.namenode.v1.DeleteCommand
+	(*BlockInfo)(nil),                // 8: dfsha.namenode.v1.BlockInfo
+	(*BlockReportRequest)(nil),       // 9: dfsha.namenode.v1.BlockReportRequest
+	(*BlockReportResponse)(nil),      // 10: dfsha.namenode.v1.BlockReportResponse
+	(*BlockReceivedRequest)(nil),     // 11: dfsha.namenode.v1.BlockReceivedRequest
+	(*BlockReceivedResponse)(nil),    // 12: dfsha.namenode.v1.BlockReceivedResponse
+	(*EditLogEntry)(nil),             // 13: dfsha.namenode.v1.EditLogEntry
+	(*MkdirOp)(nil),                  // 14: dfsha.namenode.v1.MkdirOp
+	(*DeleteOp)(nil),                 // 15: dfsha.namenode.v1.DeleteOp
+	(*RmdirOp)(nil),                  // 16: dfsha.namenode.v1.RmdirOp
+	(*ChmodOp)(nil),                  // 17: dfsha.namenode.v1.ChmodOp
+	(*AllocateBlockOp)(nil),          // 18: dfsha.namenode.v1.AllocateBlockOp
+	(*CommitBlockOp)(nil),            // 19: dfsha.namenode.v1.CommitBlockOp
+	(*FinalizeFileOp)(nil),           // 20: dfsha.namenode.v1.FinalizeFileOp
+	(*ReplicateEditLogRequest)(nil),  // 21: dfsha.namenode.v1.ReplicateEditLogRequest
+	(*ReplicateEditLogResponse)(nil), // 22: dfsha.namenode.v1.ReplicateEditLogResponse
+	(*PingRequest)(nil),              // 23: dfsha.namenode.v1.PingRequest
+	(*PingResponse)(nil),             // 24: dfsha.namenode.v1.PingResponse
+	(*v1.DataNodeEndpoint)(nil),      // 25: dfsha.datanode.v1.DataNodeEndpoint
 }
 var file_namenode_proto_depIdxs = []int32{
-	22, // 0: dfsha.namenode.v1.RegisterRequest.endpoint:type_name -> dfsha.datanode.v1.DataNodeEndpoint
-	4,  // 1: dfsha.namenode.v1.HeartbeatResponse.commands:type_name -> dfsha.namenode.v1.Command
-	5,  // 2: dfsha.namenode.v1.Command.replicate:type_name -> dfsha.namenode.v1.ReplicateCommand
-	6,  // 3: dfsha.namenode.v1.Command.delete:type_name -> dfsha.namenode.v1.DeleteCommand
-	22, // 4: dfsha.namenode.v1.ReplicateCommand.targets:type_name -> dfsha.datanode.v1.DataNodeEndpoint
-	7,  // 5: dfsha.namenode.v1.BlockReportRequest.blocks:type_name -> dfsha.namenode.v1.BlockInfo
-	7,  // 6: dfsha.namenode.v1.BlockReceivedRequest.block:type_name -> dfsha.namenode.v1.BlockInfo
-	13, // 7: dfsha.namenode.v1.EditLogEntry.mkdir:type_name -> dfsha.namenode.v1.MkdirOp
-	14, // 8: dfsha.namenode.v1.EditLogEntry.delete:type_name -> dfsha.namenode.v1.DeleteOp
-	15, // 9: dfsha.namenode.v1.EditLogEntry.allocate_block:type_name -> dfsha.namenode.v1.AllocateBlockOp
-	16, // 10: dfsha.namenode.v1.EditLogEntry.commit_block:type_name -> dfsha.namenode.v1.CommitBlockOp
-	17, // 11: dfsha.namenode.v1.EditLogEntry.finalize_file:type_name -> dfsha.namenode.v1.FinalizeFileOp
-	12, // 12: dfsha.namenode.v1.ReplicateEditLogRequest.entries:type_name -> dfsha.namenode.v1.EditLogEntry
-	0,  // 13: dfsha.namenode.v1.NameNode.Register:input_type -> dfsha.namenode.v1.RegisterRequest
-	2,  // 14: dfsha.namenode.v1.NameNode.Heartbeat:input_type -> dfsha.namenode.v1.HeartbeatRequest
-	8,  // 15: dfsha.namenode.v1.NameNode.BlockReport:input_type -> dfsha.namenode.v1.BlockReportRequest
-	10, // 16: dfsha.namenode.v1.NameNode.BlockReceived:input_type -> dfsha.namenode.v1.BlockReceivedRequest
-	18, // 17: dfsha.namenode.v1.NameNodeHA.ReplicateEditLog:input_type -> dfsha.namenode.v1.ReplicateEditLogRequest
-	20, // 18: dfsha.namenode.v1.NameNodeHA.Ping:input_type -> dfsha.namenode.v1.PingRequest
-	1,  // 19: dfsha.namenode.v1.NameNode.Register:output_type -> dfsha.namenode.v1.RegisterResponse
-	3,  // 20: dfsha.namenode.v1.NameNode.Heartbeat:output_type -> dfsha.namenode.v1.HeartbeatResponse
-	9,  // 21: dfsha.namenode.v1.NameNode.BlockReport:output_type -> dfsha.namenode.v1.BlockReportResponse
-	11, // 22: dfsha.namenode.v1.NameNode.BlockReceived:output_type -> dfsha.namenode.v1.BlockReceivedResponse
-	19, // 23: dfsha.namenode.v1.NameNodeHA.ReplicateEditLog:output_type -> dfsha.namenode.v1.ReplicateEditLogResponse
-	21, // 24: dfsha.namenode.v1.NameNodeHA.Ping:output_type -> dfsha.namenode.v1.PingResponse
-	19, // [19:25] is the sub-list for method output_type
-	13, // [13:19] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	25, // 0: dfsha.namenode.v1.RegisterRequest.endpoint:type_name -> dfsha.datanode.v1.DataNodeEndpoint
+	5,  // 1: dfsha.namenode.v1.HeartbeatResponse.commands:type_name -> dfsha.namenode.v1.Command
+	6,  // 2: dfsha.namenode.v1.Command.replicate:type_name -> dfsha.namenode.v1.ReplicateCommand
+	7,  // 3: dfsha.namenode.v1.Command.delete:type_name -> dfsha.namenode.v1.DeleteCommand
+	25, // 4: dfsha.namenode.v1.ReplicateCommand.targets:type_name -> dfsha.datanode.v1.DataNodeEndpoint
+	8,  // 5: dfsha.namenode.v1.BlockReportRequest.blocks:type_name -> dfsha.namenode.v1.BlockInfo
+	8,  // 6: dfsha.namenode.v1.BlockReceivedRequest.block:type_name -> dfsha.namenode.v1.BlockInfo
+	14, // 7: dfsha.namenode.v1.EditLogEntry.mkdir:type_name -> dfsha.namenode.v1.MkdirOp
+	15, // 8: dfsha.namenode.v1.EditLogEntry.delete:type_name -> dfsha.namenode.v1.DeleteOp
+	18, // 9: dfsha.namenode.v1.EditLogEntry.allocate_block:type_name -> dfsha.namenode.v1.AllocateBlockOp
+	19, // 10: dfsha.namenode.v1.EditLogEntry.commit_block:type_name -> dfsha.namenode.v1.CommitBlockOp
+	20, // 11: dfsha.namenode.v1.EditLogEntry.finalize_file:type_name -> dfsha.namenode.v1.FinalizeFileOp
+	16, // 12: dfsha.namenode.v1.EditLogEntry.rmdir:type_name -> dfsha.namenode.v1.RmdirOp
+	17, // 13: dfsha.namenode.v1.EditLogEntry.chmod:type_name -> dfsha.namenode.v1.ChmodOp
+	13, // 14: dfsha.namenode.v1.ReplicateEditLogRequest.entries:type_name -> dfsha.namenode.v1.EditLogEntry
+	0,  // 15: dfsha.namenode.v1.ReplicateEditLogResponse.status:type_name -> dfsha.namenode.v1.ReplicateStatus
+	1,  // 16: dfsha.namenode.v1.NameNode.Register:input_type -> dfsha.namenode.v1.RegisterRequest
+	3,  // 17: dfsha.namenode.v1.NameNode.Heartbeat:input_type -> dfsha.namenode.v1.HeartbeatRequest
+	9,  // 18: dfsha.namenode.v1.NameNode.BlockReport:input_type -> dfsha.namenode.v1.BlockReportRequest
+	11, // 19: dfsha.namenode.v1.NameNode.BlockReceived:input_type -> dfsha.namenode.v1.BlockReceivedRequest
+	21, // 20: dfsha.namenode.v1.NameNodeHA.ReplicateEditLog:input_type -> dfsha.namenode.v1.ReplicateEditLogRequest
+	23, // 21: dfsha.namenode.v1.NameNodeHA.Ping:input_type -> dfsha.namenode.v1.PingRequest
+	2,  // 22: dfsha.namenode.v1.NameNode.Register:output_type -> dfsha.namenode.v1.RegisterResponse
+	4,  // 23: dfsha.namenode.v1.NameNode.Heartbeat:output_type -> dfsha.namenode.v1.HeartbeatResponse
+	10, // 24: dfsha.namenode.v1.NameNode.BlockReport:output_type -> dfsha.namenode.v1.BlockReportResponse
+	12, // 25: dfsha.namenode.v1.NameNode.BlockReceived:output_type -> dfsha.namenode.v1.BlockReceivedResponse
+	22, // 26: dfsha.namenode.v1.NameNodeHA.ReplicateEditLog:output_type -> dfsha.namenode.v1.ReplicateEditLogResponse
+	24, // 27: dfsha.namenode.v1.NameNodeHA.Ping:output_type -> dfsha.namenode.v1.PingResponse
+	22, // [22:28] is the sub-list for method output_type
+	16, // [16:22] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_namenode_proto_init() }
@@ -1501,19 +1832,22 @@ func file_namenode_proto_init() {
 		(*EditLogEntry_AllocateBlock)(nil),
 		(*EditLogEntry_CommitBlock)(nil),
 		(*EditLogEntry_FinalizeFile)(nil),
+		(*EditLogEntry_Rmdir)(nil),
+		(*EditLogEntry_Chmod)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_namenode_proto_rawDesc), len(file_namenode_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   22,
+			NumEnums:      1,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
 		GoTypes:           file_namenode_proto_goTypes,
 		DependencyIndexes: file_namenode_proto_depIdxs,
+		EnumInfos:         file_namenode_proto_enumTypes,
 		MessageInfos:      file_namenode_proto_msgTypes,
 	}.Build()
 	File_namenode_proto = out.File

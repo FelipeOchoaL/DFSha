@@ -125,6 +125,9 @@ func TestLsREST(t *testing.T) {
 	if resp.Path != "/user/ana" || len(resp.Entries) != 2 {
 		t.Fatalf("respuesta = %+v", resp)
 	}
+	if resp.Type != "dir" {
+		t.Errorf("type de un directorio = %q", resp.Type)
+	}
 	file, dir := resp.Entries[0], resp.Entries[1] // ordenadas por nombre: datos.csv, docs
 	if file.Name != "datos.csv" || file.Type != "file" || file.Size != 20971520 ||
 		file.Owner != "ana" || file.State != "COMPLETE" || file.ModifiedAt == "" {
@@ -141,6 +144,9 @@ func TestLsREST(t *testing.T) {
 	// ls de un archivo devuelve una sola entrada.
 	w = do(t, h, "GET", "/fs/ls?path=/user/ana/datos.csv", "")
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Type != "file" {
+		t.Errorf("type de un archivo = %q", resp.Type)
+	}
 	if w.Code != 200 || len(resp.Entries) != 1 || resp.Entries[0].Name != "datos.csv" {
 		t.Errorf("ls de archivo: HTTP %d, %+v", w.Code, resp)
 	}

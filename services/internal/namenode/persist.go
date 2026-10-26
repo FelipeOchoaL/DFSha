@@ -16,7 +16,10 @@ import (
 
 // stamp devuelve la hora que se registra en una operación.
 func (s *RESTServer) stamp() time.Time {
-	return time.Now().UTC().Round(0) // Round(0) quita el reloj monotónico: la hora sobrevive al JSON
+	// Se trunca a milisegundos: es la precision del proto (timestamp_unix_ms), asi la hora
+	// es identica en el activo, en el edit log y en el standby. Truncate tambien quita el
+	// reloj monotonico, para que la hora sobreviva al JSON.
+	return time.Now().UTC().Truncate(time.Millisecond)
 }
 
 // --- aplicar operaciones (con up.mu tomado) ---
