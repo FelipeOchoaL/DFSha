@@ -1,3 +1,144 @@
-# Clúster local DFSha: namenode-active, namenode-standby y datanode-1..4 (racks A y B).
-# Se completa cuando existan los Dockerfiles en services/.
-services: {}
+# Clúster local: 1 NameNode activo, 1 standby y 4 DataNodes (racks A y B).
+# El cliente en el host llega a los DataNodes por host.docker.internal:<puerto>
+# (en AWS, ADVERTISE_ADDR es la IP pública). extra_hosts cubre Linux.
+#
+#   docker compose up --build
+#   $env:DFSHA_NAMENODES="http://localhost:8080,http://localhost:8081"
+#   python -m client.main mkdir /demo
+#   python -m client.main put .\archivo.bin /demo/archivo.bin
+#
+# TLS desactivado: en las EC2 se enciende con TLS_ENABLED=true y certificados.
+
+x-datanode: &datanode
+  build:
+    context: ./services
+    dockerfile: Dockerfile.datanode
+  image: dfsha/datanode:latest
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    - namenode-active
+
+services:
+  namenode-active:
+    build:
+      context: ./services
+      dockerfile: Dockerfile.namenode
+    image: dfsha/namenode:latest
+    container_name: dfsha-nn-active
+    environment:
+      NODE_ID: nn1
+      NAMENODE_ROLE: active
+      REST_PORT: "8080"
+      GRPC_PORT: "9000"
+      ADVERTISE_ADDR: namenode-active:9000
+      PEER_NAMENODE_ADDR: namenode-standby:9000
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      BLOCK_SIZE_MB: "8"
+      REPLICATION_FACTOR: "3"
+      DATA_DIR: /data
+      TLS_ENABLED: "false"
+      HA_REQUIRE_ACK: "false"
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    volumes:
+      - nn-active-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  namenode-standby:
+    build:
+      context: ./services
+      dockerfile: Dockerfile.namenode
+    image: dfsha/namenode:latest
+    container_name: dfsha-nn-standby
+    environment:
+      NODE_ID: nn2
+      NAMENODE_ROLE: standby
+      REST_PORT: "8080"
+      GRPC_PORT: "9000"
+      ADVERTISE_ADDR: namenode-standby:9000
+      PEER_NAMENODE_ADDR: namenode-active:9000
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      BLOCK_SIZE_MB: "8"
+      REPLICATION_FACTOR: "3"
+      DATA_DIR: /data
+      TLS_ENABLED: "false"
+    ports:
+      - "8081:8080"
+      - "9001:9000"
+    volumes:
+      - nn-standby-data:/data
+    depends_on:
+      - namenode-active
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  datanode-1:
+    <<: *datanode
+    container_name: dfsha-dn-1
+    environment:
+      NODE_ID: dn1
+      RACK: A
+      ADVERTISE_ADDR: host.docker.internal:50051
+      GRPC_PORT: "50051"
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      DATA_DIR: /data
+    ports:
+      - "50051:50051"
+    volumes:
+      - dn1-data:/data
+
+  datanode-2:
+    <<: *datanode
+    container_name: dfsha-dn-2
+    environment:
+      NODE_ID: dn2
+      RACK: A
+      ADVERTISE_ADDR: host.docker.internal:50052
+      GRPC_PORT: "50051"
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      DATA_DIR: /data
+    ports:
+      - "50052:50051"
+    volumes:
+      - dn2-data:/data
+
+  datanode-3:
+    <<: *datanode
+    container_name: dfsha-dn-3
+    environment:
+      NODE_ID: dn3
+      RACK: B
+      ADVERTISE_ADDR: host.docker.internal:50053
+      GRPC_PORT: "50051"
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      DATA_DIR: /data
+    ports:
+      - "50053:50051"
+    volumes:
+      - dn3-data:/data
+
+  datanode-4:
+    <<: *datanode
+    container_name: dfsha-dn-4
+    environment:
+      NODE_ID: dn4
+      RACK: B
+      ADVERTISE_ADDR: host.docker.internal:50054
+      GRPC_PORT: "50051"
+      NAMENODE_ADDRS: namenode-active:9000,namenode-standby:9000
+      DATA_DIR: /data
+    ports:
+      - "50054:50051"
+    volumes:
+      - dn4-data:/data
+
+volumes:
+  nn-active-data:
+  nn-standby-data:
+  dn1-data:
+  dn2-data:
+  dn3-data:
+  dn4-data:

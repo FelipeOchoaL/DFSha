@@ -1,1 +1,25 @@
-# Imagen del DataNode: compila services/cmd/datanode y expone gRPC; monta un volumen para los bloques.
+# Imagen del DataNode: compila services/cmd/datanode y expone gRPC (50051); monta un volumen para los bloques.
+#
+# Contexto de build: la carpeta services/ (asi lo hacen deploy/aws/datanode.sh y el compose):
+#   docker build -f services/Dockerfile.datanode -t dfsha/datanode:latest services
+#
+# Configuracion por variables de entorno (ver deploy/aws/env/dn-*.env.example):
+#   NODE_ID, RACK, GRPC_PORT, ADVERTISE_ADDR, NAMENODE_ADDRS, DATA_DIR, TLS_ENABLED, ...
+# Volumenes: /data (bloques; no se borra al redesplegar) y /certs cuando TLS_ENABLED=true.
+#
+# Corre como root a proposito: /data suele ser un bind mount con dueno root.
+
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/datanode ./cmd/datanode
+
+FROM alpine:3.20
+RUN mkdir -p /data /certs
+COPY --from=build /out/datanode /usr/local/bin/datanode
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 50051
+ENTRYPOINT ["/usr/local/bin/datanode"]
