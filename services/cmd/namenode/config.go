@@ -15,9 +15,11 @@ const (
 	defaultNodeID              = "namenode-1"
 	defaultRole                = roleActive
 	defaultRESTPort            = 8080
-	defaultGRPCPort            = 50050 // el default de NAMENODE_ADDRS en los DataNodes es localhost:50050
+	defaultGRPCPort            = 9000 // igual que NAMENODE_ADDRS por defecto en los DataNodes, el Dockerfile y la guia AWS
 	defaultReplicationFactor   = 3
 	defaultCommitWaitMS        = 3000              // espera maxima de commit por las replicas (US-52)
+	defaultHeartbeatSec        = 3                 // HEARTBEAT_INTERVAL_SEC: lo que se pide a los DataNodes (US-22)
+	defaultDeadAfterSec        = 10                // DEAD_AFTER_SEC: sin heartbeat este tiempo (~3 perdidos) el DataNode es DEAD
 	defaultDataDir             = "./data"          // DATA_DIR: en los contenedores es el volumen /data
 	defaultSnapshotEvery       = 1000              // operaciones entre snapshots; 0 = solo por tiempo
 	defaultSnapshotIntervalSec = 300               // segundos entre snapshots periodicos; 0 = desactivado
@@ -47,6 +49,8 @@ type config struct {
 	GRPCPort          int           // GRPC_PORT
 	ReplicationFactor int           // REPLICATION_FACTOR
 	CommitWait        time.Duration // COMMIT_WAIT_MS: milisegundos que commit espera las replicas
+	HeartbeatInterval time.Duration // HEARTBEAT_INTERVAL_SEC: intervalo que se pide a los DataNodes
+	DeadAfter         time.Duration // DEAD_AFTER_SEC: sin heartbeat este tiempo el DataNode se marca DEAD
 	AdvertiseAddr     string        // ADVERTISE_ADDR: direccion gRPC con la que otros nodos alcanzan a este NameNode
 	PeerAddr          string        // PEER_NAMENODE_ADDR (o el otro de NAMENODE_ADDRS): direccion gRPC del otro NameNode
 	MetaDir           string        // META_DIR (por defecto DATA_DIR/meta): edit log y snapshot; vacio = sin persistencia
@@ -95,6 +99,22 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("COMMIT_WAIT_MS no puede ser negativo")
 	}
 	cfg.CommitWait = time.Duration(waitMS) * time.Millisecond
+	hbSec, err := envInt(getenv, "HEARTBEAT_INTERVAL_SEC", defaultHeartbeatSec)
+	if err != nil {
+		return config{}, err
+	}
+	if hbSec <= 0 {
+		return config{}, fmt.Errorf("HEARTBEAT_INTERVAL_SEC debe ser mayor que 0")
+	}
+	cfg.HeartbeatInterval = time.Duration(hbSec) * time.Second
+	deadSec, err := envInt(getenv, "DEAD_AFTER_SEC", defaultDeadAfterSec)
+	if err != nil {
+		return config{}, err
+	}
+	if deadSec <= hbSec {
+		return config{}, fmt.Errorf("DEAD_AFTER_SEC debe ser mayor que HEARTBEAT_INTERVAL_SEC")
+	}
+	cfg.DeadAfter = time.Duration(deadSec) * time.Second
 
 	cfg.AdvertiseAddr = envString(getenv, "ADVERTISE_ADDR", "")
 	cfg.PeerAddr = envString(getenv, "PEER_NAMENODE_ADDR", "")

@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ const (
 	DefaultGRPCPort          = 50051
 	DefaultRESTPort          = 8080
 	DefaultDataDir           = "./data"
-	DefaultNameNodeAddr      = "localhost:50050"
+	DefaultNameNodeAddr      = "localhost:9000"
 	DefaultAdvertiseAddr     = "localhost"
 	DefaultBlockSizeMB       = 64
 	DefaultReplicationFactor = 3
@@ -115,4 +116,25 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
 	}
 	return value, nil
+}
+
+// AdvertiseHostPort extrae host y puerto de ADVERTISE_ADDR.
+// Acepta "host:puerto" (AWS: la IP pública y 50051) o solo "host" (usa fallbackPort).
+func AdvertiseHostPort(addr string, fallbackPort int) (host string, port uint32, err error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", 0, fmt.Errorf("ADVERTISE_ADDR is empty")
+	}
+	h, p, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		if fallbackPort <= 0 || fallbackPort > 65535 {
+			return "", 0, fmt.Errorf("ADVERTISE_ADDR %q has no port and GRPC_PORT is invalid", addr)
+		}
+		return addr, uint32(fallbackPort), nil
+	}
+	n, convErr := strconv.Atoi(p)
+	if convErr != nil || n <= 0 || n > 65535 || h == "" {
+		return "", 0, fmt.Errorf("ADVERTISE_ADDR %q must include host and a valid port", addr)
+	}
+	return h, uint32(n), nil
 }

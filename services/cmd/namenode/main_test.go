@@ -23,8 +23,8 @@ func TestLoadConfigPorDefecto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 50050, ReplicationFactor: 3,
-		CommitWait: 3 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
+	want := config{NodeID: "namenode-1", Role: "active", RESTPort: 8080, GRPCPort: 9000, ReplicationFactor: 3,
+		CommitWait: 3 * time.Second, HeartbeatInterval: 3 * time.Second, DeadAfter: 10 * time.Second, MetaDir: "./data/meta", SnapshotEvery: 1000, SnapshotInterval: 300 * time.Second,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
 		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
 		TLSEnabled: true, TLSCertFile: "/certs/node.crt", TLSKeyFile: "/certs/node.key", TLSCAFile: "/certs/ca.crt"}
@@ -49,7 +49,7 @@ func TestLoadConfigDesdeEntorno(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := config{NodeID: "namenode-active", Role: "active", RESTPort: 9090, GRPCPort: 9000, ReplicationFactor: 2,
-		CommitWait: 250 * time.Millisecond, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
+		CommitWait: 250 * time.Millisecond, HeartbeatInterval: 3 * time.Second, DeadAfter: 10 * time.Second, MetaDir: "/var/dfsha/meta", SnapshotEvery: 10, SnapshotInterval: time.Minute,
 		HARequireAck: true, HATimeout: 2 * time.Second, HASyncInterval: 5 * time.Second,
 		FailoverInterval: time.Second, FailoverFailures: 3, RecoveryWait: 30 * time.Second, RecoveryThreshold: 0.999,
 		TLSEnabled: true, TLSCertFile: "/certs/node.crt", TLSKeyFile: "/certs/node.key", TLSCAFile: "/certs/ca.crt"}

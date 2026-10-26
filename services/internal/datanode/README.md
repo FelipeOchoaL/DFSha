@@ -31,7 +31,7 @@ segundos antes de forzar el cierre.
 | `GRPC_PORT` | `50051` |
 | `REST_PORT` | `8080` |
 | `DATA_DIR` | `./data` |
-| `NAMENODE_ADDRS` | `localhost:50050` (lista separada por comas) |
+| `NAMENODE_ADDRS` | `localhost:9000` (lista separada por comas) |
 | `ADVERTISE_ADDR` | `localhost` (host anunciado, sin puerto) |
 | `BLOCK_SIZE_MB` | `64` |
 | `REPLICATION_FACTOR` | `3` |

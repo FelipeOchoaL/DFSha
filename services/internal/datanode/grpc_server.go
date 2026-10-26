@@ -23,6 +23,7 @@ type GRPCServer struct {
 	nodeID   string
 	storage  *Storage
 	chunkLen int
+	notify   func(BlockEvent)
 }
 
 func NewGRPCServer(nodeID string, storage *Storage) *GRPCServer {
@@ -32,6 +33,9 @@ func NewGRPCServer(nodeID string, storage *Storage) *GRPCServer {
 		chunkLen: defaultReadChunkSize,
 	}
 }
+
+// SetNotifier recibe cada bloque que este nodo acaba de persistir (BlockReceived).
+func (s *GRPCServer) SetNotifier(fn func(BlockEvent)) { s.notify = fn }
 
 func (s *GRPCServer) WriteBlock(stream datanodev1.DataNode_WriteBlockServer) error {
 	first, err := stream.Recv()
@@ -139,6 +143,9 @@ func (s *GRPCServer) WriteBlock(stream datanodev1.DataNode_WriteBlockServer) err
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
 		return storageStatus(err)
+	}
+	if s.notify != nil {
+		s.notify(BlockEvent{ID: info.ID, Checksum: info.ChecksumSHA256, Size: info.Size})
 	}
 
 	return stream.SendAndClose(&datanodev1.WriteBlockResponse{

@@ -294,6 +294,19 @@ func (s *Storage) List() ([]BlockInfo, error) {
 	return blocks, nil
 }
 
+// UsedBytes suma el tamaño de los bloques en disco (para el heartbeat).
+func (s *Storage) UsedBytes() uint64 {
+	blocks, err := s.List()
+	if err != nil {
+		return 0
+	}
+	var n uint64
+	for _, b := range blocks {
+		n += b.Size
+	}
+	return n
+}
+
 func (s *Storage) blockPath(id string) string {
 	return filepath.Join(s.dir, id+".blk")
 }

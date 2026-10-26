@@ -42,15 +42,27 @@ func run(ctx context.Context, cfg common.Config) error {
 	defer listener.Close()
 
 	server := grpc.NewServer()
-	datanodev1.RegisterDataNodeServer(server, datanode.NewGRPCServer(cfg.NodeID, storage))
+	svc := datanode.NewGRPCServer(cfg.NodeID, storage)
+	if len(cfg.NameNodeAddrs) > 0 && cfg.AdvertiseAddr != "" {
+		reporter, err := datanode.NewReporter(cfg, storage)
+		if err != nil {
+			return fmt.Errorf("nameNode reporter: %w", err)
+		}
+		svc.SetNotifier(reporter.NotifyBlock)
+		go reporter.Run(ctx)
+	} else {
+		log.Printf("ADVERTENCIA: sin NAMENODE_ADDRS o ADVERTISE_ADDR no hay heartbeat; este DataNode no se registrará")
+	}
+	datanodev1.RegisterDataNodeServer(server, svc)
 
 	log.Printf(
-		"DataNode starting id=%s rack=%s grpc_port=%d advertise_addr=%s data_dir=%s",
+		"DataNode starting id=%s rack=%s grpc_port=%d advertise_addr=%s data_dir=%s namenodes=%v",
 		cfg.NodeID,
 		cfg.Rack,
 		cfg.GRPCPort,
 		cfg.AdvertiseAddr,
 		cfg.DataDir,
+		cfg.NameNodeAddrs,
 	)
 
 	errs := make(chan error, 1)
