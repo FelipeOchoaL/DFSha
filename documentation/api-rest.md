@@ -150,6 +150,7 @@ Lista el contenido de un directorio. Si `path` es un archivo, devuelve una sola 
 ```json
 {
   "path": "/user/ana",
+  "type": "dir",
   "entries": [
     {
       "name": "docs",
@@ -176,7 +177,8 @@ Lista el contenido de un directorio. Si `path` es un archivo, devuelve una sola 
 }
 ```
 
-- `type`: `"dir"` o `"file"`.
+- `type` (nivel superior): tipo de la ruta consultada, `"dir"` o `"file"`. El cliente lo usa, por ejemplo, para validar `cd`.
+- `type` (en cada entrada): `"dir"` o `"file"`.
 - `state`: solo para archivos; `COMPLETE` o `UNDER_CONSTRUCTION`.
 - Las entradas vienen ordenadas por nombre.
 - En directorios `size` es `0`.

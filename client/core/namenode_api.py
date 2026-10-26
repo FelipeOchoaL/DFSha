@@ -12,6 +12,7 @@ Failover: se intenta la URL activa; ante timeout, error de conexión o 503
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Sequence
 
 import requests
@@ -95,30 +96,27 @@ class NameNodeAPI:
         return self._request("GET", "/files/locations", params={"path": path})
 
     # ---------- internos ----------
-
     def _request(self, method: str, route: str, *, params: dict | None = None,
                  body: dict | None = None, auth: bool = True) -> dict[str, Any]:
         headers = {}
         if auth and self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-
         last_error: Exception | None = None
         # Empieza por la activa y sigue con las demás en orden.
         order = [self.active_url] + [u for u in self._urls if u != self.active_url]
         for base in order:
             try:
-                resp = self._http.request(method, f"{base}{route}", params=params, json=body,
-                                          headers=headers, timeout=self._timeout,
-                                          verify=self._verify)
+                resp = self._send(method, f"{base}{route}", params, body, headers)
             except requests.RequestException as exc:
                 last_error = NameNodeUnavailableError("No se pudo contactar al NameNode")
                 last_error.__cause__ = exc
                 continue
-
-            if resp.status_code == 503:
+            if resp.status_code == 503 and _is_standby(resp):
+                # Solo NAMENODE_STANDBY (o un 503 sin código, p. ej. de un proxy) significa
+                # "prueba el siguiente". INSUFFICIENT_DATANODES y NAMENODE_RECOVERING los
+                # devuelve el NameNode ACTIVO: cambiar de NameNode no los arregla.
                 last_error = self._error_from(resp)
                 continue
-
             self.active_url = base
             if resp.status_code >= 400:
                 raise self._error_from(resp)
@@ -129,11 +127,23 @@ class NameNodeAPI:
             except ValueError:
                 raise NameNodeError("Respuesta del NameNode no es JSON válido",
                                     resp.status_code) from None
-
         assert last_error is not None
         if isinstance(last_error, NameNodeStandbyError):
             raise NameNodeUnavailableError("Ningún NameNode está activo (todos responden standby)")
         raise last_error
+
+    def _send(self, method: str, url: str, params, body, headers) -> requests.Response:
+        """Hace la petición. Si el NameNode recién promovido responde NAMENODE_RECOVERING
+        (espera los block reports de los DataNodes) reintenta en la MISMA URL, esperando
+        lo que indica Retry-After, hasta RECOVERY_RETRIES veces."""
+        for attempt in range(RECOVERY_RETRIES + 1):
+            resp = self._http.request(method, url, params=params, json=body, headers=headers,
+                                      timeout=self._timeout, verify=self._verify)
+            if resp.status_code != 503 or _error_code(resp) != CODE_RECOVERING:
+                return resp
+            if attempt < RECOVERY_RETRIES:
+                _sleep(_retry_after(resp))
+        return resp
 
     @staticmethod
     def _error_from(resp: requests.Response) -> NameNodeError:
@@ -145,6 +155,36 @@ class NameNodeAPI:
                 code = payload.get("code")
         except ValueError:
             pass
-        if resp.status_code == 503:
+        if resp.status_code == 503 and _is_standby(resp):
             return NameNodeStandbyError(message, resp.status_code, code)
         return NameNodeError(message, resp.status_code, code)
+
+
+# ---------- ayudas de los 503 ----------
+
+CODE_RECOVERING = "NAMENODE_RECOVERING"
+CODE_NO_DATANODES = "INSUFFICIENT_DATANODES"
+RECOVERY_RETRIES = 30  # con Retry-After de 1 s: hasta ~30 s tras un failover
+_sleep = time.sleep    # sustituible en las pruebas
+
+
+def _error_code(resp: requests.Response) -> str | None:
+    """El campo `code` del cuerpo de error del NameNode, si lo hay."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    return payload.get("code") if isinstance(payload, dict) else None
+
+
+def _is_standby(resp: requests.Response) -> bool:
+    """Un 503 significa 'este NameNode es standby' salvo que traiga otro código del activo."""
+    return _error_code(resp) not in (CODE_RECOVERING, CODE_NO_DATANODES)
+
+
+def _retry_after(resp: requests.Response) -> float:
+    try:
+        value = float(getattr(resp, "headers", {}).get("Retry-After", 1))
+    except (TypeError, ValueError):
+        value = 1.0
+    return min(max(value, 0.1), 5.0)
