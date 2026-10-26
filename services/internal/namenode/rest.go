@@ -1,3 +1,375 @@
 // API REST para clientes: /auth/login, /fs/ls, /fs/mkdir, /fs/rm,
-// /files/allocate, /files/commit, /files/finalize, /files/{path}/locations.
+// /files/allocate, /files/commit, /files/finalize, /files/locations.
+// El contrato exacto está en documentation/api-rest.md.
+//
+// Estado actual: /fs/ls, /fs/mkdir, /fs/rmdir (US-25) y /files/allocate,
+// /files/commit, /files/finalize (US-26, ver writes.go) y /files/locations
+// (US-27, ver reads.go).
 package namenode
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"sync/atomic"
+	"time"
+)
+
+// maxBodyBytes limita el tamaño del body JSON que aceptamos en las peticiones.
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// Códigos de error estables de la API (ver sección 1.2 de api-rest.md).
+const (
+	codeInvalidRequest     = "INVALID_REQUEST"
+	codeInvalidPath        = "INVALID_PATH"
+	codeIsADirectory       = "IS_A_DIRECTORY"
+	codeUnauthorized       = "UNAUTHORIZED"
+	codeNotFound           = "NOT_FOUND"
+	codeParentNotFound     = "PARENT_NOT_FOUND"
+	codeAlreadyExists      = "ALREADY_EXISTS"
+	codeNotADirectory      = "NOT_A_DIRECTORY"
+	codeDirNotEmpty        = "DIRECTORY_NOT_EMPTY"
+	codeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
+	codeInternal           = "INTERNAL_ERROR"
+	codeForbidden          = "FORBIDDEN"
+	codeFileBeingWritten   = "FILE_BEING_WRITTEN"
+	codeBlockOutOfOrder    = "BLOCK_OUT_OF_ORDER"
+	codeIncompleteFile     = "INCOMPLETE_FILE"
+	codeInsufficientDN     = "INSUFFICIENT_DATANODES"
+	codeBlockNotReplicated = "BLOCK_NOT_REPLICATED"
+)
+
+// anonymousUser es el usuario que se asume mientras no exista autenticación.
+const anonymousUser = "anonymous"
+
+// RESTServer expone el namespace por HTTP/JSON.
+type RESTServer struct {
+	ns            *Namespace
+	blocks        *BlockMap
+	placer        BlockPlacer
+	up            uploadTable                // subidas en curso (ver writes.go)
+	log           *EditLog                   // edit log persistente; nil si la persistencia no esta activada (persist.go)
+	snapshotEvery int                        // cada cuantas operaciones se guarda un snapshot
+	standby       atomic.Bool                // true si este NameNode es standby (ha.go)
+	replicator    atomic.Pointer[Replicator] // replicacion al standby; nil si no esta activada (ha.go)
+	recovering    atomic.Bool                // true mientras un NameNode recien promovido espera los block reports (failover.go)
+	lastTx        atomic.Int64               // ultimo txid del edit log, para PingInfo sin tomar locks
+
+	// ReplicationFactor es el número de DataNodes que allocate devuelve en el
+	// pipeline de cada bloque (REPLICATION_FACTOR). Por defecto 3.
+	ReplicationFactor int
+
+	// CommitWait es el tiempo máximo que commit espera a que los DataNodes confirmen
+	// (BlockReceived) las réplicas de un bloque antes de responder 409
+	// BLOCK_NOT_REPLICATED. Absorbe la carrera entre el ACK del pipeline al cliente
+	// y el aviso de los DataNodes al NameNode. Por defecto 3 s.
+	CommitWait time.Duration
+
+	// CommitPollInterval es cada cuánto commit revisa si ya llegaron las réplicas
+	// mientras espera. Por defecto 50 ms.
+	CommitPollInterval time.Duration
+
+	// Nodes informa qué DataNodes están vivos y cuál es su dirección. Lo usa
+	// /files/locations; debe asignarse antes de servir peticiones (lo implementa el
+	// registro de DataNodes, US-22).
+	Nodes NodeDirectory
+
+	// Deletes recibe las órdenes de borrado de bloques que genera /fs/rm (lo
+	// implementa la cola de comandos del registro de DataNodes, US-22). Si es nil,
+	// rm no encola nada y los bloques los limpia el block report (US-58).
+	Deletes BlockDeleter
+
+	// NodeID identifica a este NameNode (NODE_ID); lo informa Ping y desempata cuando
+	// dos standby quieren promoverse.
+	NodeID string
+
+	// Reregistrar pide a los DataNodes que se registren de nuevo cuando este
+	// NameNode es promovido (lo implementa el registro de DataNodes, US-22).
+	Reregistrar Reregistrar
+
+	// Identify identifica al usuario de una petición y sus grupos (del JWT, US-80).
+	// Si devuelve error la petición se rechaza con 401 UNAUTHORIZED. Es lo que usa el
+	// control de acceso por usuario y grupo (access.go, US-82).
+	Identify func(r *http.Request) (Principal, error)
+
+	// Authenticate es la forma simple de Identify: solo devuelve el usuario, sin grupos.
+	// Se usa si Identify es nil.
+	//
+	// ATENCIÓN: si no se asigna ni Identify ni Authenticate, la API no autentica y
+	// todas las peticiones son del usuario anónimo, que tiene todos los permisos.
+	// Hasta que exista el login con JWT (US-80, David) no debe exponerse fuera de un
+	// entorno de desarrollo.
+	Authenticate func(r *http.Request) (user string, err error)
+}
+
+// NewRESTServer crea el servidor REST. blocks es el mapa de bloques y placer
+// decide en qué DataNodes va cada bloque (lo implementa placement.go, US-24).
+func NewRESTServer(ns *Namespace, blocks *BlockMap, placer BlockPlacer) *RESTServer {
+	return &RESTServer{
+		ns:                 ns,
+		blocks:             blocks,
+		placer:             placer,
+		up:                 newUploadTable(),
+		ReplicationFactor:  3,
+		CommitWait:         3 * time.Second,
+		CommitPollInterval: 50 * time.Millisecond,
+	}
+}
+
+// Handler devuelve el http.Handler con todas las rutas registradas.
+func (s *RESTServer) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fs/ls", s.route(http.MethodGet, s.handleLs))
+	mux.HandleFunc("/fs/mkdir", s.route(http.MethodPost, s.handleMkdir))
+	mux.HandleFunc("/fs/rmdir", s.route(http.MethodDelete, s.handleRmdir))
+	mux.HandleFunc("/files/allocate", s.route(http.MethodPost, s.handleAllocate))
+	mux.HandleFunc("/files/commit", s.route(http.MethodPost, s.handleCommit))
+	mux.HandleFunc("/files/finalize", s.route(http.MethodPost, s.handleFinalize))
+	mux.HandleFunc("/files/locations", s.route(http.MethodGet, s.handleLocations))
+	mux.HandleFunc("/fs/rm", s.route(http.MethodDelete, s.handleRm))
+	mux.HandleFunc("/fs/chmod", s.route(http.MethodPost, s.handleChmod))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, codeNotFound, "ruta desconocida: "+r.URL.Path)
+	})
+	return s.standbyGuard(mux)
+}
+
+// handlerFunc es un handler que ya recibe al usuario autenticado.
+type handlerFunc func(w http.ResponseWriter, r *http.Request, user string)
+
+// route valida el método HTTP, autentica la petición y llama al handler. Los
+// errores salen en el formato común {"error", "code"}.
+func (s *RESTServer) route(method string, h handlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			w.Header().Set("Allow", method)
+			writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed,
+				"método no permitido: use "+method)
+			return
+		}
+		who, err := s.identify(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, err.Error())
+			return
+		}
+		who.Super = who.isSuper()
+		h(w, withPrincipal(r, who), who.User)
+	}
+}
+
+// --- /fs/ls ---
+
+type entryJSON struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	Owner       string `json:"owner"`
+	ModifiedAt  string `json:"modifiedAt"`
+	State       string `json:"state,omitempty"` // solo archivos
+	Group       string `json:"group,omitempty"`
+	Mode        string `json:"mode"`        // octal, p. ej. 0640
+	Permissions string `json:"permissions"` // simbolico, p. ej. rw-r-----
+}
+
+type lsResponse struct {
+	Path    string      `json:"path"`
+	Type    string      `json:"type"` // dir o file: lo que es la ruta consultada
+	Entries []entryJSON `json:"entries"`
+}
+
+// handleLs: GET /fs/ls?path=<ruta>. Sin path lista "/".
+func (s *RESTServer) handleLs(w http.ResponseWriter, r *http.Request, _ string) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		p = "/"
+	}
+	norm, err := NormalizePath(p)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Dir: AccessRead}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	entries, err := s.ns.List(norm)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	st, err := s.ns.Stat(norm)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	resp := lsResponse{Path: norm, Type: string(st.Type), Entries: make([]entryJSON, 0, len(entries))}
+	for _, e := range entries {
+		resp.Entries = append(resp.Entries, entryJSON{
+			Name:        e.Name,
+			Type:        string(e.Type),
+			Size:        e.Size,
+			Owner:       e.Owner,
+			ModifiedAt:  e.ModTime.UTC().Format(time.RFC3339),
+			State:       string(e.State),
+			Group:       e.Group,
+			Mode:        fmt.Sprintf("%04o", e.Mode),
+			Permissions: FormatMode(e.Mode),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- /fs/mkdir ---
+
+type mkdirRequest struct {
+	Path    string `json:"path"`
+	Parents bool   `json:"parents"`
+}
+
+type pathResponse struct {
+	Path string `json:"path"`
+}
+
+// handleMkdir: POST /fs/mkdir {"path": "...", "parents": false}.
+// 201 si se creó; 200 si parents=true y el directorio ya existía.
+func (s *RESTServer) handleMkdir(w http.ResponseWriter, r *http.Request, user string) {
+	var req mkdirRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el campo obligatorio: path")
+		return
+	}
+	norm, err := NormalizePath(req.Path)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	// Las mutaciones se serializan con up.mu: ver persist.go.
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	existed := false
+	if req.Parents {
+		if e, err := s.ns.Stat(norm); err == nil && e.Type == TypeDir {
+			existed = true
+		}
+	}
+	who := principalOf(r)
+	need := AccessReq{Parent: AccessWrite | AccessExec, CreateParents: req.Parents}
+	if existed { // mkdir -p de algo que ya existe: no crea nada, basta poder llegar hasta ahi
+		need = AccessReq{}
+	}
+	if err := s.ns.Authorize(norm, who, need); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	entry := EditEntry{Op: OpMkdir, Time: s.stamp(), Path: norm, Owner: user, Group: who.PrimaryGroup(), Mode: defaultDirMode, Parents: req.Parents}
+	if err := s.applyMkdir(entry); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if existed {
+		status = http.StatusOK // mkdir -p de un directorio existente: no cambia nada, no se registra
+	} else if !s.record(w, &entry) {
+		return
+	}
+	writeJSON(w, status, pathResponse{Path: norm})
+}
+
+// --- /fs/rmdir ---
+
+// handleRmdir: DELETE /fs/rmdir?path=<ruta>. Solo directorios vacíos.
+func (s *RESTServer) handleRmdir(w http.ResponseWriter, r *http.Request, _ string) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "falta el parámetro obligatorio: path")
+		return
+	}
+	norm, err := NormalizePath(p)
+	if err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+
+	if err := s.ns.Authorize(norm, principalOf(r), AccessReq{Parent: AccessWrite | AccessExec}); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	entry := EditEntry{Op: OpRmdir, Time: s.stamp(), Path: norm}
+	if err := s.applyRmdir(entry); err != nil {
+		writeNamespaceError(w, err)
+		return
+	}
+	if !s.record(w, &entry) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- utilidades de respuesta ---
+
+type errorJSON struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, errorJSON{Error: msg, Code: code})
+}
+
+// writeNamespaceError traduce los errores del namespace a HTTP.
+func writeNamespaceError(w http.ResponseWriter, err error) {
+	status, code := http.StatusInternalServerError, codeInternal
+	switch {
+	case errors.Is(err, ErrPermissionDenied):
+		status, code = http.StatusForbidden, codeForbidden
+	case errors.Is(err, ErrInvalidPath):
+		status, code = http.StatusBadRequest, codeInvalidPath
+	case errors.Is(err, ErrIsDirectory):
+		status, code = http.StatusBadRequest, codeIsADirectory
+	case errors.Is(err, ErrNotFound):
+		status, code = http.StatusNotFound, codeNotFound
+	case errors.Is(err, ErrParentNotFound):
+		status, code = http.StatusNotFound, codeParentNotFound
+	case errors.Is(err, ErrAlreadyExists):
+		status, code = http.StatusConflict, codeAlreadyExists
+	case errors.Is(err, ErrNotDirectory):
+		status, code = http.StatusConflict, codeNotADirectory
+	case errors.Is(err, ErrNotEmpty):
+		status, code = http.StatusConflict, codeDirNotEmpty
+	}
+	msg := err.Error()
+	if status == http.StatusInternalServerError {
+		msg = "error interno del servidor" // no filtrar detalles al cliente
+	}
+	writeError(w, status, code, msg)
+}
+
+// decodeBody lee el body JSON en v. Si es inválido responde 400 y devuelve false.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err := dec.Decode(v); err != nil {
+		msg := "el body no es un JSON válido"
+		if errors.Is(err, io.EOF) {
+			msg = "falta el body JSON"
+		}
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return false
+	}
+	return true
+}

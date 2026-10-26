@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 data/
 *.exe
+guia-git.txt
+guia-james-namenode.md
 *.part
 *.key
 *.pem

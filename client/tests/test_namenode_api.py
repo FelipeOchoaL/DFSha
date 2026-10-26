@@ -74,3 +74,80 @@ def test_all_down_raises_unavailable():
 def test_preferred_url_goes_first():
     api = NameNodeAPI(["http://a", "http://b"], preferred="http://b")
     assert api.active_url == "http://b"
+
+
+def test_allocate_opens_then_continues_the_same_upload():
+    api = NameNodeAPI(["http://a"])
+    with patch.object(requests.Session, "request", return_value=_Resp(200, {"uploadId": "up-1"})) as request:
+        assert api.allocate("/file", 0, 0, 10)["uploadId"] == "up-1"
+        assert "uploadId" not in request.call_args.kwargs["json"]
+        api.allocate("/file", 1, 10, 5, upload_id="up-1")
+        assert request.call_args.kwargs["json"] == {
+            "path": "/file", "blockIndex": 1, "offset": 10, "size": 5, "uploadId": "up-1"}
+
+
+@pytest.mark.parametrize("operation", ["commit", "finalize"])
+def test_write_operations_send_the_upload_id(operation):
+    api = NameNodeAPI(["http://a"])
+    with patch.object(requests.Session, "request", return_value=_Resp(200, {"ok": True})) as request:
+        if operation == "commit":
+            api.commit("/file", "block-1", 10, "a" * 64,
+                       replica_ids=("dn1", "dn2", "dn3"), upload_id="up-1")
+        else:
+            api.finalize("/file", upload_id="up-1")
+    assert request.call_args.args == ("POST", f"http://a/files/{operation}")
+    assert request.call_args.kwargs["json"]["uploadId"] == "up-1"
+
+
+def test_503_without_standby_code_fails_over():
+    api = NameNodeAPI(["http://a", "http://b"])
+    responses = {
+        "http://a/fs/ls": _Resp(503, {"error": "standby", "code": "NAMENODE_STANDBY"}),
+        "http://b/fs/ls": _Resp(200, {"entries": []}),
+    }
+    with patch.object(requests.Session, "request", side_effect=lambda m, u, **kw: responses[u]):
+        assert api.ls("/") == {"entries": []}
+    assert api.active_url == "http://b"
+
+
+def test_insufficient_datanodes_does_not_fail_over():
+    api = NameNodeAPI(["http://a", "http://b"])
+    seen = []
+
+    def fake(method, url, **kw):
+        seen.append(url)
+        return _Resp(503, {"error": "faltan DataNodes", "code": "INSUFFICIENT_DATANODES"})
+
+    with patch.object(requests.Session, "request", side_effect=fake):
+        with pytest.raises(NameNodeError) as ei:
+            api.ls("/")
+    assert ei.value.status == 503 and ei.value.code == "INSUFFICIENT_DATANODES"
+    assert seen == ["http://a/fs/ls"]
+
+
+def test_recovering_retries_the_same_url_then_succeeds(monkeypatch):
+    monkeypatch.setattr("client.core.namenode_api._sleep", lambda s: None)
+    api = NameNodeAPI(["http://a", "http://b"])
+    calls = []
+
+    def fake(method, url, **kw):
+        calls.append(url)
+        if len(calls) < 3:
+            return _Resp(503, {"error": "recuperando", "code": "NAMENODE_RECOVERING"})
+        return _Resp(200, {"entries": []})
+
+    with patch.object(requests.Session, "request", side_effect=fake):
+        assert api.ls("/") == {"entries": []}
+    assert calls == ["http://a/fs/ls"] * 3
+
+
+def test_recovering_gives_up_after_the_retry_limit(monkeypatch):
+    from client.core import namenode_api
+
+    monkeypatch.setattr(namenode_api, "_sleep", lambda s: None)
+    api = NameNodeAPI(["http://a"])
+    with patch.object(requests.Session, "request",
+                      return_value=_Resp(503, {"error": "recuperando", "code": "NAMENODE_RECOVERING"})) as m:
+        with pytest.raises(Exception):
+            api.ls("/")
+    assert m.call_count <= namenode_api.RECOVERY_RETRIES + 2

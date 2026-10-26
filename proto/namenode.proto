@@ -109,12 +109,19 @@ message EditLogEntry {
     AllocateBlockOp allocate_block = 12;
     CommitBlockOp commit_block = 13;
     FinalizeFileOp finalize_file = 14;
+    RmdirOp rmdir = 15;
+    ChmodOp chmod = 16;
   }
 }
 
 message MkdirOp {
   string path = 1;
   string owner = 2;
+  string group = 3;
+  // Permisos rwx en octal (0750...). 0 = los de por defecto.
+  uint32 mode = 4;
+  // Crear tambien los directorios padre que falten (mkdir -p).
+  bool parents = 5;
 }
 
 message DeleteOp {
@@ -122,11 +129,33 @@ message DeleteOp {
   bool recursive = 2;
 }
 
+// rmdir de un directorio vacio.
+message RmdirOp {
+  string path = 1;
+}
+
+// Cambio de permisos. Aqui mode 0 es valido (---------).
+message ChmodOp {
+  string path = 1;
+  uint32 mode = 2;
+}
+
 message AllocateBlockOp {
   string path = 1;
   uint32 block_index = 2;
   string block_id = 3;
   repeated string datanode_ids = 4;
+  // Subida a la que pertenece el bloque; el standby la conserva para que el cliente
+  // pueda continuarla tras un failover.
+  string upload_id = 5;
+  // true en el primer allocate: crea el archivo y abre la subida.
+  bool new_upload = 6;
+  // Dueno, grupo y permisos del archivo (solo se usan si new_upload).
+  string owner = 7;
+  string group = 8;
+  uint32 mode = 9;
+  // Tamano pedido para el bloque. block_id vacio = archivo vacio (no hay bloque).
+  uint64 size = 10;
 }
 
 message CommitBlockOp {
@@ -134,11 +163,13 @@ message CommitBlockOp {
   string block_id = 2;
   uint64 size = 3;
   string checksum_sha256 = 4;
+  string upload_id = 5;
 }
 
 message FinalizeFileOp {
   string path = 1;
   uint64 total_size = 2;
+  string upload_id = 3;
 }
 
 message ReplicateEditLogRequest {
@@ -146,7 +177,20 @@ message ReplicateEditLogRequest {
 }
 
 message ReplicateEditLogResponse {
+  // Ultimo txid aplicado por el standby (el ACK). Tambien se informa cuando status != OK.
   uint64 last_applied_txid = 1;
+  ReplicateStatus status = 2;
+  string message = 3;
+}
+
+enum ReplicateStatus {
+  REPLICATE_STATUS_OK = 0;
+  // Las entradas no continuan el log del standby: el activo reenvia desde last_applied_txid + 1.
+  REPLICATE_STATUS_GAP = 1;
+  // El receptor no es standby (ya fue promovido): el emisor debe degradarse.
+  REPLICATE_STATUS_NOT_STANDBY = 2;
+  // El standby ya tiene una entrada distinta con ese txid: hay que resincronizarlo.
+  REPLICATE_STATUS_DIVERGED = 3;
 }
 
 message PingRequest {

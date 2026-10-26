@@ -81,3 +81,18 @@ cd services
 go build ./...
 go test ./...
 ```
+
+### NameNode
+Un par activo/standby se levanta con los mismos binarios y distinto `NAMENODE_ROLE`. La API REST está en `documentation/api-rest.md`.
+
+| Variable | Por defecto | Uso |
+|---|---|---|
+| `NAMENODE_ROLE` | `active` | `active` o `standby` (rol inicial; tras un failover el rol efectivo puede cambiar) |
+| `REST_PORT` / `GRPC_PORT` | `8080` / `50050` | Puertos de la API REST y del gRPC |
+| `ADVERTISE_ADDR` | | Dirección `host:puerto` gRPC propia |
+| `PEER_NAMENODE_ADDR` | | gRPC del otro NameNode. Si falta se deduce de `NAMENODE_ADDRS` (la única distinta de `ADVERTISE_ADDR`) |
+| `DATA_DIR` / `META_DIR` | `./data` / `DATA_DIR/meta` | Edit log y snapshot del namespace |
+| `HA_REQUIRE_ACK` | `true` | Replicación estricta: la escritura falla si el standby no confirma |
+| `TLS_ENABLED` | `true` | HTTPS en REST y mTLS en gRPC. Certificados en `/certs/node.crt`, `/certs/node.key`, `/certs/ca.crt` |
+
+Los Dockerfiles de `services/` construyen cada binario estático; corren como root porque el bind mount de `/data` pertenece a root.

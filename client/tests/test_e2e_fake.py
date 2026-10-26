@@ -54,6 +54,11 @@ def test_full_cycle(env, capsys):
 
     meta = nn.files["/user/ana/docs/a.bin"]
     assert meta["complete"] and len(meta["blocks"]) == 3
+    allocations = [body for route, body in nn.upload_calls if route == "/files/allocate"]
+    assert not allocations[0].get("uploadId")
+    assert all(body["uploadId"] == meta["uploadId"] for body in allocations[1:])
+    assert all(body["uploadId"] == meta["uploadId"] for route, body in nn.upload_calls
+               if route in ("/files/commit", "/files/finalize"))
     # Partición: cada bloque está en exactamente 3 réplicas, en nodos distintos.
     for blk in meta["blocks"]:
         assert len(set(blk["replicaIds"])) == 3
@@ -102,6 +107,8 @@ def test_put_retries_when_pipeline_node_is_down(env):
     meta = nn.files["/user/ana/r.bin"]
     assert meta["complete"]
     assert all("dn1" not in b["replicaIds"] for b in meta["blocks"])
+    allocations = [body for route, body in nn.upload_calls if route == "/files/allocate"]
+    assert all(body["uploadId"] == meta["uploadId"] for body in allocations[1:])
     # Hubo más allocate que bloques: el cliente reintentó con un pipeline nuevo.
     allocs = sum(1 for m, p in nn.calls if p == "/files/allocate")
     assert allocs > len(meta["blocks"])
@@ -110,3 +117,85 @@ def test_put_retries_when_pipeline_node_is_down(env):
 def test_unauthenticated_gets_clear_error(env, capsys):
     assert _run("ls", "/") == 1
     assert "login" in capsys.readouterr().err
+
+
+def test_failed_first_block_cleans_its_upload(env, monkeypatch):
+    from client.core.datanode_client import DataNodeClient
+    from client.core.errors import DataNodeUnavailableError
+
+    def fail_write(*args, **kwargs):
+        raise DataNodeUnavailableError("simulated outage", "dn0", "block")
+
+    monkeypatch.setattr(DataNodeClient, "write_block", fail_write)
+    _run("login", "ana")
+    source = env["tmp"] / "failed.bin"
+    source.write_bytes(b"first block")
+    assert _run("put", str(source), "/user/ana/failed.bin") == 1
+    nn = env["nn"]
+    assert "/user/ana/failed.bin" not in nn.files
+    allocations = [body for route, body in nn.upload_calls if route == "/files/allocate"]
+    assert len(allocations) == 3
+    assert allocations[1]["uploadId"] == allocations[2]["uploadId"]
+    assert ("DELETE", "/fs/rm") in nn.calls
+
+
+def test_failed_put_does_not_delete_an_existing_file(env):
+    _run("login", "ana")
+    source = env["tmp"] / "existing.bin"
+    source.write_bytes(b"original contents")
+    remote = "/user/ana/existing.bin"
+    assert _run("put", str(source), remote) == 0
+    original = env["nn"].files[remote]
+    source.write_bytes(b"replacement contents")
+    assert _run("put", str(source), remote) == 1
+    assert env["nn"].files[remote] is original
+    assert original["complete"]
+    destination = env["tmp"] / "preserved.bin"
+    assert _run("get", remote, str(destination)) == 0
+    assert destination.read_bytes() == b"original contents"
+
+
+def test_missing_upload_id_stops_before_writing_blocks(env, monkeypatch, capsys):
+    nn = env["nn"]
+    original_handle = nn.handle
+
+    def omit_upload_id(method, path, qs, body):
+        status, payload = original_handle(method, path, qs, body)
+        if path == "/files/allocate" and status == 200:
+            payload.pop("uploadId")
+        return status, payload
+
+    monkeypatch.setattr(nn, "handle", omit_upload_id)
+    _run("login", "ana")
+    source = env["tmp"] / "missing-id.bin"
+    source.write_bytes(b"data")
+    assert _run("put", str(source), "/user/ana/missing-id.bin") == 1
+    assert "uploadId" in capsys.readouterr().err
+    assert not any(node.blocks for node in env["dns"])
+    assert not any(route in ("/files/commit", "/files/finalize") for route, _ in nn.upload_calls)
+
+
+def test_allocate_cannot_switch_upload_id_between_blocks(env, monkeypatch, capsys):
+    nn = env["nn"]
+    original_handle = nn.handle
+    allocations = 0
+
+    def switch_upload_id(method, path, qs, body):
+        nonlocal allocations
+        status, payload = original_handle(method, path, qs, body)
+        if path == "/files/allocate" and status == 200:
+            allocations += 1
+            if allocations == 2:
+                payload["uploadId"] = "different-upload"
+        return status, payload
+
+    monkeypatch.setattr(nn, "handle", switch_upload_id)
+    _run("login", "ana")
+    source = env["tmp"] / "changed-id.bin"
+    source.write_bytes(b"x" * (300 * 1024))
+    remote = "/user/ana/changed-id.bin"
+    assert _run("put", str(source), remote) == 1
+    assert "uploadId distinto" in capsys.readouterr().err
+    assert remote not in nn.files
+    assert sum(route == "/files/commit" for route, _ in nn.upload_calls) == 1
+    assert sum(len(node.blocks) for node in env["dns"]) == 3

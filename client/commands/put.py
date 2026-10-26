@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from client.commands._common import datanode, namenode, remember_namenode
@@ -16,6 +17,11 @@ from client.core.errors import DataNodeError, DfshaError, NameNodeError
 from client.core.namenode_api import NameNodeAPI, pick
 
 MAX_RETRIES = 3
+
+
+@dataclass
+class UploadState:
+    upload_id: str | None = None
 
 
 def run(args, config, session) -> int:
@@ -31,16 +37,17 @@ def run(args, config, session) -> int:
     if total == 0:
         raise DfshaError("El archivo está vacío; DFSha v1 no almacena archivos de 0 bytes")
 
-    started = False
+    upload = UploadState()
     try:
         for chunk in iter_chunks(local, block_size):
             print(f"bloque {chunk.index + 1}/{total} ({len(chunk.data)} B)...", end=" ", flush=True)
-            result = upload_block(api, dn, remote, chunk)
-            started = True
+            result = upload_block(api, dn, remote, chunk, upload)
             print(f"ok -> réplicas {', '.join(result) or '?'}")
-        api.finalize(remote)
+        if upload.upload_id is None:
+            raise NameNodeError("No se pudo iniciar la subida")
+        api.finalize(remote, upload_id=upload.upload_id)
     except DfshaError:
-        if started:
+        if upload.upload_id is not None:
             # No dejar un archivo UNDER_CONSTRUCTION huérfano.
             with contextlib.suppress(DfshaError):
                 api.rm(remote)
@@ -51,11 +58,19 @@ def run(args, config, session) -> int:
     return 0
 
 
-def upload_block(api: NameNodeAPI, dn, remote: str, chunk: Chunk) -> tuple[str, ...]:
+def upload_block(api: NameNodeAPI, dn, remote: str, chunk: Chunk,
+                 upload: UploadState) -> tuple[str, ...]:
     """Sube un bloque con reintentos. Devuelve los ids de las réplicas confirmadas."""
     last: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
-        alloc = api.allocate(remote, chunk.index, chunk.offset, len(chunk.data))
+        alloc = api.allocate(remote, chunk.index, chunk.offset, len(chunk.data),
+                             upload_id=upload.upload_id)
+        returned_upload_id = pick(alloc, "uploadId", "upload_id")
+        if not isinstance(returned_upload_id, str) or not returned_upload_id:
+            raise NameNodeError("allocate no devolvió un uploadId válido")
+        if upload.upload_id is not None and returned_upload_id != upload.upload_id:
+            raise NameNodeError("allocate devolvió un uploadId distinto al de la subida")
+        upload.upload_id = returned_upload_id
         block_id = pick(alloc, "blockId", "block_id")
         pipeline = pick(alloc, "pipeline", "datanodes", "replicas", default=[])
         if not block_id or not pipeline:
@@ -64,7 +79,7 @@ def upload_block(api: NameNodeAPI, dn, remote: str, chunk: Chunk) -> tuple[str, 
             result = dn.write_block(pipeline[0], block_id, chunk.data, chunk.sha256,
                                     pipeline=pipeline[1:])
             api.commit(remote, block_id, len(chunk.data), chunk.sha256,
-                       replica_ids=result.replica_ids)
+                       replica_ids=result.replica_ids, upload_id=upload.upload_id)
             return result.replica_ids
         except (DataNodeError, NameNodeError) as exc:
             last = exc
