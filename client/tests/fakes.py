@@ -120,6 +120,8 @@ class FakeNameNode:
         self.stale_allocs = 0
         self.dirs: set[str] = {"/"}
         self.files: dict[str, dict] = {}  # path -> {"complete": bool, "blocks": [..]}
+        self.upload_calls: list[tuple[str, dict]] = []
+        self._next_upload_id = 0
         self._rr = 0
         self._lock = threading.Lock()
         self._server = None
@@ -211,10 +213,19 @@ class FakeNameNode:
                 return 204, None
             if path == "/files/allocate":
                 b = body()
+                self.upload_calls.append((path, dict(b)))
                 p = b["path"]
-                meta = self.files.setdefault(p, {"complete": False, "blocks": []})
-                if meta["complete"]:
-                    return 409, {"error": "ya existe"}
+                upload_id = b.get("uploadId")
+                meta = self.files.get(p)
+                if not upload_id:
+                    if b["blockIndex"] != 0:
+                        return 400, {"error": "falta uploadId", "code": "INVALID_REQUEST"}
+                    if meta is not None:
+                        return 409, {"error": "ya existe", "code": "ALREADY_EXISTS"}
+                elif meta is None or meta["uploadId"] != upload_id or meta["complete"]:
+                    return 404, {"error": "subida desconocida", "code": "NOT_FOUND"}
+                if meta is not None and b["blockIndex"] != len(meta["blocks"]):
+                    return 409, {"error": "bloque fuera de orden", "code": "BLOCK_OUT_OF_ORDER"}
                 if self.stale_allocs > 0:
                     self.stale_allocs -= 1
                     alive = list(self.datanodes)
@@ -222,24 +233,51 @@ class FakeNameNode:
                     alive = [d for d in self.datanodes if d.alive]
                 if len(alive) < self.replication:
                     return 503, {"error": "no hay suficientes DataNodes"}
+                if meta is None:
+                    self._next_upload_id += 1
+                    meta = {"complete": False, "blocks": [],
+                            "uploadId": f"upload_{self._next_upload_id}", "pending": None}
+                    self.files[p] = meta
                 pipeline = [alive[(self._rr + i) % len(alive)].endpoint for i in range(self.replication)]
                 self._rr += 1
                 block_id = f"blk_{p.strip('/').replace('/', '_')}_{b['blockIndex']}_{self._rr}"
-                return 200, {"blockId": block_id, "offset": b["offset"], "size": b["size"],
+                meta["pending"] = {"blockId": block_id, "size": b["size"]}
+                return 200, {"uploadId": meta["uploadId"], "blockId": block_id,
+                             "offset": b["offset"], "size": b["size"],
                              "pipeline": pipeline}
             if path == "/files/commit":
                 b = body()
+                self.upload_calls.append((path, dict(b)))
+                if not b.get("uploadId"):
+                    return 400, {"error": "falta uploadId", "code": "INVALID_REQUEST"}
+                meta = self.files.get(b["path"])
+                if meta is None or meta["uploadId"] != b["uploadId"]:
+                    return 404, {"error": "subida desconocida", "code": "NOT_FOUND"}
+                pending = meta["pending"]
+                if pending is None or pending["blockId"] != b["blockId"]:
+                    return 409, {"error": "bloque no asignado", "code": "BLOCK_OUT_OF_ORDER"}
+                if pending["size"] != b["size"]:
+                    return 400, {"error": "tamaño distinto al asignado", "code": "INVALID_REQUEST"}
                 replicas = b.get("replicaIds", [])
-                if len(replicas) < self.replication:
+                if len(set(replicas)) < self.replication:
                     return 409, {"error": "réplicas insuficientes"}
-                meta = self.files[b["path"]]
                 meta["blocks"] = [x for x in meta["blocks"] if x["blockId"] != b["blockId"]]
                 meta["blocks"].append({"blockId": b["blockId"], "size": b["size"],
                                        "checksumSha256": b["checksumSha256"],
                                        "replicaIds": replicas})
+                meta["pending"] = None
                 return 200, {}
             if path == "/files/finalize":
-                self.files[body()["path"]]["complete"] = True
+                b = body()
+                self.upload_calls.append((path, dict(b)))
+                if not b.get("uploadId"):
+                    return 400, {"error": "falta uploadId", "code": "INVALID_REQUEST"}
+                meta = self.files.get(b["path"])
+                if meta is None or meta["uploadId"] != b["uploadId"]:
+                    return 404, {"error": "subida desconocida", "code": "NOT_FOUND"}
+                if meta["pending"] is not None:
+                    return 409, {"error": "bloque sin confirmar", "code": "INCOMPLETE_FILE"}
+                meta["complete"] = True
                 return 200, {}
             if path == "/files/locations":
                 meta = self.files[qs["path"]]

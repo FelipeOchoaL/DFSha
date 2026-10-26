@@ -70,21 +70,24 @@ class NameNodeAPI:
 
     # ---------- escritura ----------
 
-    def allocate(self, path: str, block_index: int, offset: int, size: int) -> dict[str, Any]:
-        """Devuelve blockId, offset, size y pipeline [{id, host, port, rack}, ...]."""
-        return self._request("POST", "/files/allocate", body={
-            "path": path, "blockIndex": block_index, "offset": offset, "size": size})
+    def allocate(self, path: str, block_index: int, offset: int, size: int,
+                 *, upload_id: str | None = None) -> dict[str, Any]:
+        """Abre una subida o continúa la identificada por upload_id."""
+        body = {"path": path, "blockIndex": block_index, "offset": offset, "size": size}
+        if upload_id is not None:
+            body["uploadId"] = upload_id
+        return self._request("POST", "/files/allocate", body=body)
 
     def commit(self, path: str, block_id: str, size: int, checksum_sha256: str,
-               replica_ids: Sequence[str] = ()) -> dict[str, Any]:
-        body = {"path": path, "blockId": block_id, "size": size,
+               replica_ids: Sequence[str] = (), *, upload_id: str) -> dict[str, Any]:
+        body = {"path": path, "uploadId": upload_id, "blockId": block_id, "size": size,
                 "checksumSha256": checksum_sha256}
         if replica_ids:
             body["replicaIds"] = list(replica_ids)
         return self._request("POST", "/files/commit", body=body)
 
-    def finalize(self, path: str) -> dict[str, Any]:
-        return self._request("POST", "/files/finalize", body={"path": path})
+    def finalize(self, path: str, *, upload_id: str) -> dict[str, Any]:
+        return self._request("POST", "/files/finalize", body={"path": path, "uploadId": upload_id})
 
     # ---------- lectura ----------
 

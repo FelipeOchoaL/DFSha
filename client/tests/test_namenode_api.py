@@ -74,3 +74,26 @@ def test_all_down_raises_unavailable():
 def test_preferred_url_goes_first():
     api = NameNodeAPI(["http://a", "http://b"], preferred="http://b")
     assert api.active_url == "http://b"
+
+
+def test_allocate_opens_then_continues_the_same_upload():
+    api = NameNodeAPI(["http://a"])
+    with patch.object(requests.Session, "request", return_value=_Resp(200, {"uploadId": "up-1"})) as request:
+        assert api.allocate("/file", 0, 0, 10)["uploadId"] == "up-1"
+        assert "uploadId" not in request.call_args.kwargs["json"]
+        api.allocate("/file", 1, 10, 5, upload_id="up-1")
+        assert request.call_args.kwargs["json"] == {
+            "path": "/file", "blockIndex": 1, "offset": 10, "size": 5, "uploadId": "up-1"}
+
+
+@pytest.mark.parametrize("operation", ["commit", "finalize"])
+def test_write_operations_send_the_upload_id(operation):
+    api = NameNodeAPI(["http://a"])
+    with patch.object(requests.Session, "request", return_value=_Resp(200, {"ok": True})) as request:
+        if operation == "commit":
+            api.commit("/file", "block-1", 10, "a" * 64,
+                       replica_ids=("dn1", "dn2", "dn3"), upload_id="up-1")
+        else:
+            api.finalize("/file", upload_id="up-1")
+    assert request.call_args.args == ("POST", f"http://a/files/{operation}")
+    assert request.call_args.kwargs["json"]["uploadId"] == "up-1"
