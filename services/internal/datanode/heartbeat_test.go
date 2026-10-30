@@ -3,6 +3,7 @@ package datanode
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	namenodev1 "dfsha/services/gen/namenode/v1"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 func startTestNameNode(t *testing.T) (addr string, reg *namenode.Registry, blocks *namenode.BlockMap) {
@@ -91,6 +94,53 @@ func TestAdvertiseHostPort(t *testing.T) {
 	if err != nil || h != "localhost" || p != 50051 {
 		t.Fatalf("host-only: %s:%d %v", h, p, err)
 	}
+}
+
+type standbyReporterServer struct {
+	namenodev1.UnimplementedNameNodeServer
+	registers atomic.Int32
+}
+
+func (s *standbyReporterServer) Register(context.Context, *namenodev1.RegisterRequest) (*namenodev1.RegisterResponse, error) {
+	s.registers.Add(1)
+	return nil, status.Error(codes.Unavailable, "este NameNode es standby")
+}
+
+func TestReporterTriesNextNameNodeWhenFirstIsStandby(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	standby := &standbyReporterServer{}
+	srv := grpc.NewServer()
+	namenodev1.RegisterNameNodeServer(srv, standby)
+	go srv.Serve(ln)
+	t.Cleanup(srv.Stop)
+	active, reg, _ := startTestNameNode(t)
+	storage, err := NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := NewReporter(common.Config{NodeID: "dn-rotate", AdvertiseAddr: "127.0.0.1:50051",
+		NameNodeAddrs: []string{ln.Addr().String(), active}}, storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); rep.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := reg.LiveNode("dn-rotate"); ok {
+			if standby.registers.Load() == 0 {
+				t.Fatal("no se intentó primero el standby")
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("el reporter no pasó del standby al NameNode activo")
 }
 
 func TestDialInsecureStillWorks(t *testing.T) {

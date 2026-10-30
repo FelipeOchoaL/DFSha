@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	defaultCapacityBytes   = 100 << 30 // 100 GiB si no hay DATANODE_CAPACITY_BYTES
-	reconnectWait          = 2 * time.Second
-	defaultReportEvery     = 10 * time.Minute
-	commandTimeout         = 2 * time.Minute
-	blockReceivedTimeout   = 5 * time.Second
+	defaultCapacityBytes = 100 << 30 // 100 GiB si no hay DATANODE_CAPACITY_BYTES
+	reconnectWait        = 2 * time.Second
+	defaultReportEvery   = 10 * time.Minute
+	commandTimeout       = 2 * time.Minute
+	blockReceivedTimeout = 5 * time.Second
 )
 
 // BlockEvent es un bloque que acaba de guardarse en disco.
@@ -49,11 +49,12 @@ type Reporter struct {
 	interval time.Duration
 	capacity uint64
 
-	mu        sync.Mutex
-	conn      *grpc.ClientConn
-	client    namenodev1.NameNodeClient
-	current   string
-	pending   []BlockEvent
+	mu         sync.Mutex
+	conn       *grpc.ClientConn
+	client     namenodev1.NameNodeClient
+	current    string
+	nextAddr   int // siguiente candidato después de desconectar, también si responde standby
+	pending    []BlockEvent
 	lastReport time.Time
 }
 
@@ -152,10 +153,13 @@ func (r *Reporter) ensureClient(ctx context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
+	start := r.nextAddr
 	r.mu.Unlock()
 
 	var last error
-	for _, addr := range r.addrs {
+	for offset := range r.addrs {
+		idx := (start + offset) % len(r.addrs)
+		addr := r.addrs[idx]
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -172,6 +176,7 @@ func (r *Reporter) ensureClient(ctx context.Context) error {
 		r.conn = conn
 		r.client = namenodev1.NewNameNodeClient(conn)
 		r.current = addr
+		r.nextAddr = (idx + 1) % len(r.addrs)
 		r.mu.Unlock()
 		log.Printf("connected to NameNode %s", addr)
 		return nil
